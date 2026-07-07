@@ -56,6 +56,10 @@ _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 # AAPL260918C00150000. Groups: (yymmdd, side letter).
 _OCC_RE = re.compile(r"(\d{6})([CP])\d{7,8}")
 
+# The placeholder Yahoo renders in place of a chain table when its
+# option data is dark (observed in the overnight hours).
+_NO_DATA_RE = re.compile(r"There are no (?:calls|puts)", re.IGNORECASE)
+
 # ── Pure HTML parsers (no Selenium — unit-testable) ──────────────────────
 
 
@@ -178,25 +182,38 @@ def parse_chain_tables(html: str) -> dict[str, pd.DataFrame | None]:
     except ValueError:  # "No tables found"
         return chain
 
+    detected: dict[str, list[pd.DataFrame]] = {"calls": [], "puts": []}
     positional: list[pd.DataFrame] = []
     for df in tables:
         df.columns = [str(c).strip() for c in df.columns]
         if not {"Strike", "Bid", "Implied Volatility"} <= set(df.columns):
             continue
         side = _side_of_table(df)
-        if side == "call" and chain["calls"] is None:
-            chain["calls"] = df
-        elif side == "put" and chain["puts"] is None:
-            chain["puts"] = df
-        elif side is None:
+        if side == "call":
+            detected["calls"].append(df)
+        elif side == "put":
+            detected["puts"].append(df)
+        else:
             positional.append(df)
     # No Contract Name column (older/alternate layout): Yahoo renders
-    # calls above puts, so assign by position.
+    # calls above puts, so assign leftovers to the empty slots in order.
     for df in positional:
-        if chain["calls"] is None:
-            chain["calls"] = df
-        elif chain["puts"] is None:
-            chain["puts"] = df
+        if not detected["calls"]:
+            detected["calls"].append(df)
+        elif not detected["puts"]:
+            detected["puts"].append(df)
+    for key, dfs in detected.items():
+        if not dfs:
+            continue
+        # Some layouts split a side across tables (and a sticky-header
+        # clone shows up as a duplicate) — concatenate rather than keep
+        # only the first, then dedupe so OI can't double-count.
+        df = pd.concat(dfs, ignore_index=True) if len(dfs) > 1 else dfs[0]
+        if len(dfs) > 1:
+            df = (df.drop_duplicates(subset=["Contract Name"])
+                  if "Contract Name" in df.columns
+                  else df.drop_duplicates())
+        chain[key] = df
 
     for key, df in chain.items():
         if df is None:
@@ -277,6 +294,11 @@ def rows_from_tables(chain: dict[str, pd.DataFrame | None], *,
                 volume=safe_int(row.get("Volume")),
                 last_trade_days=_trade_age_days(
                     row.get(lt_col) if lt_col else None),
+                # Overnight Yahoo zeroes bid/ask on the site well before
+                # it drops the chain entirely; keep last-trade-priced
+                # rows or after-hours scans collapse to nothing (or to
+                # one side, which flips GEX).
+                require_quote=False,
             )
             if built is not None:
                 rows.append(built)
@@ -304,6 +326,11 @@ def _create_driver(cfg: dict):
         if cfg.get("headless", True):
             opts.add_argument("-headless")
         opts.set_preference("general.useragent.override", _UA)
+        # Tall viewport: some page variants lazy-render the puts table
+        # below the fold, and a table that never enters the viewport
+        # never hydrates.
+        opts.add_argument("--width=1920")
+        opts.add_argument("--height=3000")
         driver = webdriver.Firefox(options=opts)
     else:
         from selenium.webdriver.chrome.options import Options
@@ -313,7 +340,8 @@ def _create_driver(cfg: dict):
         if cfg.get("headless", True):
             opts.add_argument("--headless=new")
         opts.add_argument("--disable-gpu")
-        opts.add_argument("--window-size=1920,1080")
+        # Tall viewport — see the Firefox note above.
+        opts.add_argument("--window-size=1920,3000")
         opts.add_argument(f"user-agent={_UA}")
         driver = webdriver.Chrome(options=opts)
     with _pool_lock:
@@ -430,6 +458,16 @@ def _load_page(url: str, cfg: dict, open_expiry_menu: bool = False) -> str:
         log.warning("No chain table rendered for %s", url)
         return driver.page_source or ""
     time.sleep(float(cfg.get("settle_seconds", 2.0)))
+    # Sweep the viewport down the page and back so any lazy-rendered
+    # content (the puts table sits below the calls table) hydrates even
+    # if the tall window wasn't enough.
+    try:
+        driver.execute_script(
+            "window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(0.6)
+        driver.execute_script("window.scrollTo(0, 0);")
+    except Exception:
+        pass
     if open_expiry_menu:
         _open_expiry_menu(driver)
     return driver.page_source or ""
@@ -512,26 +550,54 @@ def fetch_chain_yahoo_headless(
              ticker, len(wanted), min_dte,
              max_dte if max_dte is not None else "∞")
 
+    # type=all / straddle=false pin the page to the two-table
+    # calls-over-puts view — some layout variants otherwise remember a
+    # one-sided or straddle view and render only part of the chain.
+    def _exp_url(ts: int) -> str:
+        return f"{base_url}?date={ts}&type=all&straddle=false"
+
     futures = {
-        ex.submit(_load_page, f"{base_url}?date={ts}", cfg): (exp_str, dte)
+        ex.submit(_load_page, _exp_url(ts), cfg): (ts, exp_str, dte)
         for ts, exp_str, dte in wanted
     }
 
     rows: list[dict] = []
     pages_with_tables = 0
-    for fut, (exp_str, dte) in futures.items():
+    placeholder_pages = 0
+    for fut, (ts, exp_str, dte) in futures.items():
         try:
             html = fut.result()
         except Exception as exc:
             log.warning("  Skipping %s %s: %s", ticker, exp_str, exc)
             continue
+        if _NO_DATA_RE.search(html):
+            placeholder_pages += 1
         chain = parse_chain_tables(html)
+        if opt_type == "both" and (
+                (chain["calls"] is None) != (chain["puts"] is None)):
+            # Half a chain is a rendering hiccup (lazy table never
+            # hydrated), not a market fact — reload the page once.
+            missing = "puts" if chain["puts"] is None else "calls"
+            log.warning("  %s %s: %s table missing — retrying page",
+                        ticker, exp_str, missing)
+            try:
+                retry = parse_chain_tables(
+                    ex.submit(_load_page, _exp_url(ts), cfg).result())
+                if (retry["calls"] is not None
+                        and retry["puts"] is not None):
+                    chain = retry
+            except Exception as exc:
+                log.warning("  %s %s: retry failed: %s",
+                            ticker, exp_str, exc)
         if chain["calls"] is not None or chain["puts"] is not None:
             pages_with_tables += 1
         if not chain_matches_expiration(chain, exp_str):
             log.warning("  %s %s: page served a different expiration "
                         "— skipping", ticker, exp_str)
             continue
+        log.info("  %s %s: %d calls / %d puts parsed", ticker, exp_str,
+                 0 if chain["calls"] is None else len(chain["calls"]),
+                 0 if chain["puts"] is None else len(chain["puts"]))
         rows.extend(rows_from_tables(
             chain, spot=spot, exp_str=exp_str, dte=dte, opt_type=opt_type))
 
@@ -540,7 +606,30 @@ def fetch_chain_yahoo_headless(
             f"Yahoo rendered no option tables for {ticker} — the site "
             "may be blocking automated browsers right now, or the page "
             "layout changed.")
+    # A two-sided request that came back entirely one-sided means every
+    # page dropped the same table — degraded scrape, and quietly returning
+    # it would poison anything sign-sensitive (GEX flips all-negative).
+    # No optionable ticker has a genuinely one-sided book at this size.
+    if opt_type == "both" and rows:
+        n_calls = sum(1 for r in rows if r["type"] == "call")
+        n_puts = len(rows) - n_calls
+        if min(n_calls, n_puts) == 0 and max(n_calls, n_puts) >= 20:
+            got, missing = (("calls", "puts") if n_calls
+                            else ("puts", "calls"))
+            raise ValueError(
+                f"Yahoo returned only {got} for {ticker} ({len(rows)} "
+                f"contracts, no {missing}) — Yahoo often drops one side "
+                "first when its overnight chain data degrades, and "
+                "one-sided data would be misleading (GEX flips sign). "
+                "Rescan in a while.")
     if not rows:
+        if placeholder_pages:
+            raise ValueError(
+                f"Yahoo's option chain data is dark for {ticker} right "
+                f"now ({placeholder_pages} of {len(wanted)} expiration "
+                "pages show 'There are no calls/puts') — its chain "
+                "backend goes empty like this in the overnight hours. "
+                "Rescan later.")
         return pd.DataFrame()
     return (pd.DataFrame(rows)
             .sort_values(["expiration", "type", "strike"])

@@ -60,11 +60,16 @@ def build_option_row(
     theta: float = 0.0,
     vega: float = 0.0,
     last_trade_days: float = float("nan"),
+    require_quote: bool = True,
 ) -> dict | None:
     """Apply quote-quality filters and assemble a canonical chain row.
 
     Returns None when the quote is too sparse to keep:
-      - both bid and ask are zero/missing
+      - both bid and ask are zero/missing (skipped when
+        require_quote=False — the headless scraper passes that so an
+        after-hours chain whose bid/asks Yahoo has zeroed out still
+        yields rows priced off the last trade; last_trade_days carries
+        the staleness downstream)
       - even after the bid/ask → last fallback, mid is still <= 0
       - IV is below the 1% noise floor
       - strike is non-positive
@@ -78,7 +83,7 @@ def build_option_row(
     `hv_20`/`vr_ratio` start as NaN; all are overwritten downstream by
     `iv_surface.compute_iv_excess` and `fetch._enrich`.
     """
-    if bid <= 0 and ask <= 0:
+    if require_quote and bid <= 0 and ask <= 0:
         return None
     if mid <= 0:
         mid = (bid + ask) / 2 if bid > 0 and ask > 0 else last

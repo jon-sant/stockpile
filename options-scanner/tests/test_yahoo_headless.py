@@ -146,6 +146,30 @@ def test_parse_no_tables():
     assert chain == {"calls": None, "puts": None}
 
 
+def test_parse_concats_split_side_tables_and_dedupes():
+    # A side split across two tables (plus one duplicated row from a
+    # sticky-header clone) must concatenate without double-counting.
+    t1 = _chain_table_html("AAPL", "call", strike="150.00")
+    t2 = _chain_table_html("AAPL", "call", strike="155.00").replace(
+        "AAPL260918C00150000", "AAPL260918C00155000")
+    chain = parse_chain_tables(f"<html>{t1}{t2}{t1}</html>")
+    assert chain["calls"] is not None
+    assert sorted(chain["calls"]["Strike"]) == [150.0, 155.0]
+    assert chain["puts"] is None
+
+
+def test_parse_second_same_side_table_not_dropped():
+    # Regression: the old first-match-wins logic silently discarded a
+    # second table that detected as the same side.
+    t1 = _chain_table_html("AAPL", "put", strike="140.00").replace(
+        "AAPL260918P00150000", "AAPL260918P00140000")
+    t2 = _chain_table_html("AAPL", "put", strike="145.00").replace(
+        "AAPL260918P00150000", "AAPL260918P00145000")
+    chain = parse_chain_tables(f"<html>{t1}{t2}</html>")
+    assert chain["puts"] is not None
+    assert sorted(chain["puts"]["Strike"]) == [140.0, 145.0]
+
+
 # ── chain_matches_expiration ─────────────────────────────────────────────
 
 def test_expiration_match_accepts_right_date():
@@ -208,9 +232,31 @@ def test_rows_respects_opt_type_filter():
     assert rows and all(r["type"] == "put" for r in rows)
 
 
-def test_rows_drops_quoteless_contracts():
+def test_rows_keeps_last_priced_contracts_when_quotes_zeroed():
+    # Overnight Yahoo zeroes bid/ask before the chain goes dark; rows
+    # must survive priced off the last trade (mid = Last Price).
     chain = parse_chain_tables(
         _chain_table_html("AAPL", "call", bid="0.00", ask="0.00"))
     rows = rows_from_tables(chain, spot=212.44, exp_str="2026-09-18",
                             dte=74, opt_type="both")
+    assert len(rows) == 1
+    assert rows[0]["mid"] == pytest.approx(2.20)  # the Last Price cell
+
+
+def test_rows_drops_contracts_with_no_price_at_all():
+    html = _chain_table_html("AAPL", "call", bid="0.00", ask="0.00"
+                             ).replace("<td>2.20</td>", "<td>0.00</td>")
+    rows = rows_from_tables(parse_chain_tables(html), spot=212.44,
+                            exp_str="2026-09-18", dte=74, opt_type="both")
     assert rows == []
+
+
+def test_parse_placeholder_page_yields_empty_tables():
+    # Yahoo's overnight "no data" rendering: a table whose only row is
+    # the placeholder sentence in every cell.
+    cells = "".join(f"<td>There are no calls.</td>" for _ in range(4))
+    html = ("<table><thead><tr><th>Contract Name</th><th>Strike</th>"
+            "<th>Bid</th><th>Implied Volatility</th></tr></thead>"
+            f"<tbody><tr>{cells}</tr></tbody></table>")
+    chain = parse_chain_tables(html)
+    assert chain["calls"] is not None and chain["calls"].empty
