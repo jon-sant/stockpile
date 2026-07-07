@@ -49,7 +49,8 @@ def load_config() -> dict:
 
 
 def get_provider(cfg: dict) -> str:
-    """Return 'yahoo', 'schwab', or 'moomoo' from config, defaulting to 'yahoo'."""
+    """Return 'yahoo', 'yahoo-headless', 'schwab', or 'moomoo' from
+    config, defaulting to 'yahoo'."""
     return cfg.get("data_source", {}).get("provider", "yahoo")
 
 
@@ -64,6 +65,32 @@ def get_schwab_config(cfg: dict) -> dict:
         # Forward-looking: when order placement is enabled, default to
         # paper/sandbox so live orders are an explicit opt-in.
         "paper":        bool(s.get("paper", True)),
+    }
+
+
+def get_yahoo_headless_config(cfg: dict) -> dict:
+    """Return the [yahoo_headless] section with defaults filled in.
+
+    Keys:
+        browser:        'chrome' (default) or 'firefox'.
+        binary:         explicit browser executable path; usually blank
+                        (needed e.g. for snap-packaged browsers whose
+                        wrapper script the driver rejects).
+        max_workers:    concurrent browser pages / long-lived browser
+                        instances (default 4; each costs ~200 MB RAM).
+        headless:       False shows the browser windows for debugging.
+        settle_seconds: extra wait after the chain table renders so the
+                        streamed price fields hydrate (default 2.0).
+        page_timeout:   seconds to wait for a chain table (default 25).
+    """
+    y = cfg.get("yahoo_headless", {})
+    return {
+        "browser":        str(y.get("browser", "chrome")),
+        "binary":         str(y.get("binary", "")) or None,
+        "max_workers":    int(y.get("max_workers", 4)),
+        "headless":       bool(y.get("headless", True)),
+        "settle_seconds": float(y.get("settle_seconds", 2.0)),
+        "page_timeout":   float(y.get("page_timeout", 25)),
     }
 
 

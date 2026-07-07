@@ -267,6 +267,51 @@ def _scan_one(pos: dict, opt_type_key: str, scan_mode_key: str,
     }
 
 
+def _scan_all_parallel(positions: list, opt_type_key: str,
+                       scan_mode_key: str, provider: str,
+                       scfg: dict | None, min_dte: int, max_dte: int,
+                       progress) -> list:
+    """Scan every position concurrently (yahoo-headless only).
+
+    The headless provider keeps a bounded pool of long-lived browsers,
+    so overlapping symbols just interleave their page loads there —
+    unlike the API providers there's no shared throttle to trip, and
+    no wait-and-retry choreography. Results come back in `positions`
+    order; a failed ticker degrades to an error card instead of
+    aborting the batch.
+    """
+    import concurrent.futures
+    import functools
+
+    try:  # same graceful degrade as tabs/trades.py
+        from streamlit.runtime.scriptrunner import (
+            add_script_run_ctx, get_script_run_ctx,
+        )
+        _init = functools.partial(add_script_run_ctx,
+                                  ctx=get_script_run_ctx())
+    except Exception:  # pragma: no cover — shields Streamlit layout drift
+        _init = None
+
+    def _job(pos):
+        try:
+            return _scan_one(pos, opt_type_key, scan_mode_key, provider,
+                             scfg, min_dte, max_dte)
+        except Exception as exc:  # noqa: BLE001 — degrade to an error card
+            return {"position": pos, "error": f"{type(exc).__name__}: {exc}",
+                    "df": pd.DataFrame(), "spot": None,
+                    "earnings_dates": [], "roll_close_costs": {}}
+
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(4, len(positions)), initializer=_init) as ex:
+        futures = [ex.submit(_job, p) for p in positions]
+        done = 0
+        for _ in concurrent.futures.as_completed(futures):
+            done += 1
+            progress.progress(done / len(positions),
+                              text=f"Scanning… ({done}/{len(positions)})")
+    return [f.result() for f in futures]
+
+
 def tab_portfolio() -> None:
     """Brokerage-CSV scan: every position in an export."""
     _render_scan_tab(is_watchlist=False, k="p")
@@ -585,7 +630,8 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
         if st.session_state.get("data_source", "yahoo") == "yahoo":
             st.caption("Yahoo Finance option quotes can be unavailable while "
                        "the market is closed — scans may come back empty or "
-                       "throttled until it reopens.")
+                       "throttled until it reopens. Yahoo (headless) scrapes "
+                       "the site directly and usually still gets quotes.")
     with _btn_col:
         _scan_clicked = st.button(_scan_label, type="primary",
                                   disabled=_scan_disabled)
@@ -638,6 +684,13 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
         progress = st.progress(0, text="Scanning…")
         results = []
         rl_give_up = False  # a wait didn't clear the throttle → stop waiting
+        if _provider == "yahoo-headless" and len(positions) > 1:
+            # Browser scrape has no shared API throttle — scan every
+            # symbol at once instead of the serial wait-and-retry loop.
+            results = _scan_all_parallel(
+                positions, opt_type_key, scan_mode_key, _provider, _scfg,
+                int(port_min_dte), int(port_max_dte), progress)
+            positions = []  # skip the sequential loop below
         for i, pos in enumerate(positions):
             pct = (i + 1) / len(positions)
             progress.progress(pct, text=f"Scanning {pos['ticker']} "

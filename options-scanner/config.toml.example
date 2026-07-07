@@ -3,12 +3,13 @@
 # Copy this file to config.toml and fill in your credentials.
 # config.toml is gitignored — never commit credentials.
 #
-# Data source: "yahoo" (default, no setup), "schwab" (real-time), or "moomoo" (real-time).
+# Data source: "yahoo" (default, no setup), "yahoo-headless" (browser scrape,
+# works after hours), "schwab" (real-time), or "moomoo" (real-time).
 # See SCHWAB_DATA_SOURCE.md for Schwab setup instructions.
 # For Moomoo: install OpenD from https://www.moomoo.com/download/openD and run it locally.
 
 [data_source]
-provider = "yahoo"  # default in dropdown, "yahoo", "schwab", or "moomoo"
+provider = "yahoo"  # default in dropdown: "yahoo", "yahoo-headless", "schwab", or "moomoo"
 
 # ── Schwab credentials ──────────────────────────────────────────────────────
 # Required only when provider = "schwab".
@@ -27,6 +28,21 @@ token_file   = "~/.config/schwab-token.json"
 # (still gated by market hours + a two-step confirm). Requires the "Accounts
 # and Trading" API product. See FIRST_TRADE_TEST.md / SCHWAB_DATA_SOURCE.md.
 paper        = true
+
+# ── Yahoo headless (browser scrape) ─────────────────────────────────────────
+# Optional tuning for provider = "yahoo-headless". Scrapes the
+# finance.yahoo.com chain pages with a Selenium-driven browser — slower
+# than the API, but still returns quotes after hours when the JSON API
+# serves zeroed bid/asks. Needs Chrome (or Firefox) installed; Selenium
+# downloads the matching driver automatically. All keys optional.
+
+[yahoo_headless]
+browser        = "chrome"  # or "firefox"
+# binary       = "/path/to/browser"  # only if the browser isn't auto-found
+max_workers    = 4         # concurrent browser pages (each ~200 MB RAM)
+headless       = true      # false shows the browser windows (debugging)
+settle_seconds = 2.0       # extra wait after the chain table renders
+page_timeout   = 25        # seconds to wait for a chain table
 
 # ── Moomoo / OpenD credentials ───────────────────────────────────────────────
 # Required only when provider = "moomoo".

@@ -19,11 +19,17 @@ from __future__ import annotations
 import streamlit as st
 
 
-PROVIDER_LABELS = {"yahoo": "Yahoo Finance", "schwab": "Schwab", "moomoo": "Moomoo"}
+PROVIDER_LABELS = {
+    "yahoo":          "Yahoo Finance",
+    "yahoo-headless": "Yahoo (headless)",
+    "schwab":         "Schwab",
+    "moomoo":         "Moomoo",
+}
 PROVIDER_COLORS = {
-    "yahoo":  "#16a34a",   # green
-    "schwab": "#2563eb",   # blue
-    "moomoo": "#f97316",   # orange
+    "yahoo":          "#16a34a",   # green
+    "yahoo-headless": "#0d9488",   # teal
+    "schwab":         "#2563eb",   # blue
+    "moomoo":         "#f97316",   # orange
 }
 
 

@@ -30,6 +30,7 @@ from options_scanner.display.iv_surface_3d import render_iv_surface_3d
 
 _PROVIDER_LINE = {
     "yahoo":  {"color": "#10b981", "strokeDash": [6, 4]},  # green dashed
+    "yahoo-headless": {"color": "#0d9488", "strokeDash": [6, 4]},  # teal dashed
     "schwab": {"color": "#3b82f6", "strokeDash": [6, 4]},  # blue dashed
 }
 
