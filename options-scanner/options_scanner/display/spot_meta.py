@@ -48,7 +48,9 @@ def fetch_spot_meta(ticker: str, data_source: str) -> dict:
         "source_key":    data_source,
     }
     try:
-        if data_source == "yahoo":
+        # yahoo-headless scans still take spot *meta* (day-change %) from
+        # fast_info — it's quote metadata, not the throttled chain API.
+        if data_source in ("yahoo", "yahoo-headless"):
             import yfinance as yf
             from stocks_shared.yahoo import normalize_ticker
             info = yf.Ticker(normalize_ticker(ticker)).fast_info

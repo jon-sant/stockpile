@@ -142,10 +142,17 @@ def fetch_chain(ticker: str, opt_type: str = "both",
 
     opt_type: "both", "calls", or "puts"
     max_dte:  upper DTE limit; None = no limit
-    provider: "yahoo" (default), "schwab", or "moomoo"
+    provider: "yahoo" (default), "yahoo-headless", "schwab", or "moomoo"
     schwab_config: dict with app_key, app_secret, callback_url, token_file
     moomoo_config: dict with host, port (OpenD gateway address)
+
+    "yahoo-headless" scrapes the finance.yahoo.com chain pages with a
+    Selenium browser (works after hours when the JSON API serves zeroed
+    quotes); it reads its own tuning from [yahoo_headless] in config.toml.
     """
+    if provider == "yahoo-headless":
+        from options_scanner.yahoo_headless import fetch_chain_yahoo_headless
+        return fetch_chain_yahoo_headless(ticker, opt_type, min_dte, max_dte)
     if provider == "schwab":
         from options_scanner.schwab_chain import fetch_chain_schwab
         return fetch_chain_schwab(ticker, opt_type, min_dte, max_dte,

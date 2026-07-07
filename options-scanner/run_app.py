@@ -115,6 +115,8 @@ if "data_source_choice" not in st.session_state:
         st.session_state["data_source_choice"] = "schwab"
     elif _cfg_provider == "moomoo":
         st.session_state["data_source_choice"] = "moomoo"
+    elif _cfg_provider == "yahoo-headless":
+        st.session_state["data_source_choice"] = "yahoo-headless"
     else:
         st.session_state["data_source_choice"] = "yahoo"
 
@@ -124,6 +126,7 @@ if "data_source_choice" not in st.session_state:
 # changed, not one rerun later.
 _BTN_COLORS = {
     "yahoo":  ("#16a34a", "#15803d"),   # normal, hover
+    "yahoo-headless": ("#0d9488", "#0f766e"),
     "schwab": ("#2563eb", "#1d4ed8"),
     "moomoo": ("#f97316", "#ea6e0e"),
 }
@@ -237,6 +240,8 @@ st.iframe(
 def _source_label(s: str) -> str:
     if s == "yahoo":
         return "Yahoo Finance"
+    if s == "yahoo-headless":
+        return "Yahoo (headless)"
     if s == "moomoo":
         return "Moomoo (live)"
     if not _schwab_configured:
@@ -246,7 +251,7 @@ def _source_label(s: str) -> str:
 with st.container(key="data_source_pill"):
     _source_raw = st.segmented_control(
         "Data source",
-        ["yahoo", "schwab", "moomoo"],
+        ["yahoo", "yahoo-headless", "schwab", "moomoo"],
         format_func=_source_label,
         label_visibility="collapsed",
         key="data_source_choice",
@@ -258,6 +263,8 @@ if _source_raw == "schwab" and _schwab_configured:
     data_source = "schwab"
 elif _source_raw == "moomoo":
     data_source = "moomoo"
+elif _source_raw == "yahoo-headless":
+    data_source = "yahoo-headless"
 else:
     data_source = "yahoo"
 st.session_state["data_source"] = data_source
@@ -324,9 +331,10 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
     st.caption(
-        "Switch between Yahoo Finance (free, 15-min delay), Schwab "
-        "(authenticated, live), and Moomoo (live via OpenD). "
-        "Use the toggle in the top bar."
+        "Switch between Yahoo Finance (free, 15-min delay), Yahoo "
+        "(headless) (browser scrape — slower, but returns quotes after "
+        "hours when the Yahoo API serves none), Schwab (authenticated, "
+        "live), and Moomoo (live via OpenD). Use the toggle in the top bar."
     )
     st.markdown("---")
     section_header("About", eyebrow="HOW THIS WORKS")

@@ -235,7 +235,7 @@ def show_gex_chart(df: pd.DataFrame, spot: float,
 
     provider_caveat = (
         "GEX estimated from Black-Scholes gamma (Yahoo IV may be stale on LEAPS)."
-        if provider == "yahoo"
+        if provider in ("yahoo", "yahoo-headless")
         else "GEX computed from Schwab's native gamma values."
     )
     st.caption(f"{dte_note} {provider_caveat}")

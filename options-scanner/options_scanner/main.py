@@ -439,7 +439,8 @@ def main() -> None:
         help="Directory for HTML output (default: options-scanner/output/)",
     )
     parser.add_argument(
-        "--data-source", dest="data_source", choices=["yahoo", "schwab"],
+        "--data-source", dest="data_source",
+        choices=["yahoo", "yahoo-headless", "schwab"],
         default=None,
         help="Data source override (default: from config.toml or 'yahoo')",
     )
