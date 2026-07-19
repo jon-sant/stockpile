@@ -77,7 +77,7 @@ def test_different_strike_gets_different_seed_and_result():
 
 def test_run_batch_isolates_one_row_failure():
     good = _row(rowid=1)
-    bad = _row(rowid=2, iv=None)  # no positive IV -> vol_source resolution raises
+    bad = _row(rowid=2, iv=None)  # missing iv -> caught by _missing_inputs upfront
     out = mc_batch.run_batch([good, bad])
     by_rowid = {rowid: (result, error) for rowid, result, error in out}
 
@@ -89,7 +89,7 @@ def test_run_batch_isolates_one_row_failure():
     bad_result, bad_error = by_rowid[2]
     assert bad_result is None
     assert bad_error is not None
-    assert "IV" in bad_error
+    assert "iv" in bad_error
 
 
 def test_run_batch_returns_one_tuple_per_row():
@@ -97,3 +97,59 @@ def test_run_batch_returns_one_tuple_per_row():
     out = mc_batch.run_batch(rows)
     assert len(out) == 3
     assert [rowid for rowid, _, _ in out] == [0, 1, 2]
+
+
+# ── Missing/unusable inputs (regression: rows scanned via a path that
+# doesn't capture spot/earnings_next_date, e.g. main.py's CLI flow before
+# it was fixed, must fail with a clear reason, not a bare TypeError) ─────
+
+
+def test_missing_spot_raises_clear_value_error_not_type_error():
+    row = _row(spot=None)
+    try:
+        mc_batch.compute_mc_for_row(row)
+        assert False, "expected ValueError"
+    except TypeError:
+        assert False, "regression: bare TypeError instead of a clear ValueError"
+    except ValueError as exc:
+        assert "spot" in str(exc)
+
+
+def test_missing_mid_raises_clear_value_error():
+    row = _row(mid=None)
+    try:
+        mc_batch.compute_mc_for_row(row)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "mid" in str(exc)
+
+
+def test_nan_spot_raises_clear_value_error():
+    row = _row(spot=float("nan"))
+    try:
+        mc_batch.compute_mc_for_row(row)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "spot" in str(exc)
+
+
+def test_zero_spot_raises_clear_value_error():
+    row = _row(spot=0.0)
+    try:
+        mc_batch.compute_mc_for_row(row)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "spot" in str(exc)
+
+
+def test_run_batch_isolates_missing_inputs_with_clear_error():
+    good = _row(rowid=1)
+    bad = _row(rowid=2, spot=None, earnings_next_date=None)
+    out = mc_batch.run_batch([good, bad])
+    by_rowid = {rowid: (result, error) for rowid, result, error in out}
+
+    assert by_rowid[1][1] is None  # good row: no error
+    bad_result, bad_error = by_rowid[2]
+    assert bad_result is None
+    assert "TypeError" not in bad_error
+    assert "spot" in bad_error

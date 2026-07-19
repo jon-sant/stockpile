@@ -58,6 +58,25 @@ def _position_for_row(row: dict, side: Literal["long", "short"]) -> Position:
                     legs=(leg,), earnings_dates=earnings_dates)
 
 
+def _missing_inputs(row: dict) -> str | None:
+    """Which required input is missing/unusable, or None if the row has
+    everything needed. Checked up front so a row that can never be
+    computed (e.g. scanned before spot/iv were persisted, or via a path
+    that doesn't capture them — see main.py's CLI flow) fails with one
+    clear, permanent reason instead of a bare TypeError from deep inside
+    Position construction."""
+    for col in ("spot", "mid", "iv"):
+        v = row.get(col)
+        if v is None or (isinstance(v, float) and v != v):  # None or NaN
+            return f"missing/NaN required input {col!r}"
+        try:
+            if float(v) <= 0:
+                return f"non-positive required input {col!r}={v!r}"
+        except (TypeError, ValueError):
+            return f"unusable required input {col!r}={v!r}"
+    return None
+
+
 def compute_mc_for_row(row: dict) -> dict:
     """Compute the 14 Monte Carlo metric columns (see
     `iv_history._MC_METRIC_COLS`) for one chain row, both buy and sell
@@ -67,10 +86,18 @@ def compute_mc_for_row(row: dict) -> dict:
     iv, spot, earnings_next_date (all as read back from
     `iv_history.pending_mc_rows`).
 
-    Raises whatever the underlying engine raises (e.g. no positive IV to
-    resolve a vol from) — the caller (`run_batch`) isolates one row's
+    Raises ValueError with a clear reason when spot/mid/iv are missing
+    or unusable (permanently un-computable — e.g. a legacy row scanned
+    before this feature shipped, or a thin/illiquid quote the provider
+    never populated), or whatever the underlying engine raises for a
+    usable-but-degenerate row (e.g. no positive IV to resolve a vol
+    from). Either way the caller (`run_batch`) isolates one row's
     failure from the rest of the batch.
     """
+    reason = _missing_inputs(row)
+    if reason is not None:
+        raise ValueError(f"cannot compute Monte Carlo for this row: {reason}")
+
     start = time.perf_counter()
     today = date.fromisoformat(row["scan_date"])
     seed = _deterministic_seed(row["ticker"], row["scan_date"], row["type"],
