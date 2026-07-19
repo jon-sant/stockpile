@@ -27,6 +27,7 @@ from options_scanner.defaults import default_delta_range
 from options_scanner.display.chain_table import show_chain_table
 from options_scanner.display.iv_chart import show_iv_chart
 from options_scanner.display.outlook_card import render_outlook_card
+from options_scanner.display.rank_filter import filter_sort_top_n
 from options_scanner.display.scan_results import show_scan_results
 from options_scanner.display.surface_diagnostics import show_surface_diagnostics
 from options_scanner.display.spot_meta import (
@@ -37,8 +38,9 @@ from options_scanner.display.spot_meta import (
 from options_scanner import chain_cache
 from options_scanner.fetch import fetch_and_enrich_cached
 from options_scanner.format import fmt_strike
-from options_scanner import iv_algorithms, iv_history, iv_scores
+from options_scanner import iv_algorithms, iv_history, iv_scores, mc_background
 from options_scanner.iv_filters import DEFAULT_CONFIG as FILTER_DEFAULT, SurfaceFilterConfig
+from options_scanner.market_view import stance_for
 from options_scanner.mc_ui import position_from_chain_row, render_mc_panel
 from options_scanner.recent_scans import build_label, load as load_recent, save as save_recent
 from options_scanner.ui_theme import (
@@ -494,6 +496,12 @@ def tab_single() -> None:
         max_dte_arg = int(max_dte_inp) if max_dte_inp > 0 else None
         delta_min, delta_max = delta_range
 
+        # A roll isn't a directional bet in the outlook card's sense —
+        # buy/option_type sit at their unused defaults for that flow, so
+        # deriving a stance from them would be misleading. None -> no
+        # drift, same as any other "no state found" row.
+        market_view_stance = None if rolling else stance_for(buy, option_type)
+
         _was_auto_populate = _auto_populate
         _fetch_provider = ("yahoo-headless" if _was_auto_populate
                            else st.session_state.get("data_source", "yahoo"))
@@ -509,6 +517,7 @@ def tab_single() -> None:
                 star_score_config,
                 moomoo_config=st.session_state.get("moomoo_config"),
                 force_live=False,
+                market_view=market_view_stance,
             )
 
         if err:
@@ -610,6 +619,37 @@ def tab_single() -> None:
             "surface_filters": surface_filter_config,
             "algo_config": algo_config,
         }
+
+        # Block until the rows about to be shown (same top-N cut
+        # show_scan_results is about to render — display/rank_filter.
+        # filter_sort_top_n, applied here identically) have real Monte
+        # Carlo values instead of "TBD". mc_background.compute_now()
+        # times out gracefully (default 30s) and leaves any remainder
+        # pending for the normal async worker, so this never hangs the
+        # UI indefinitely even on a very large/slow chain.
+        _priority_df = (df[df["type"] == eff_mode].reset_index(drop=True)
+                        if eff_mode in ("call", "put") else df)
+        _priority_df = _priority_df[
+            _priority_df["delta"].abs().between(delta_min, delta_max)]
+        _priority_types = [eff_mode] if eff_mode in ("call", "put") else ["call", "put"]
+        _priority_slices = [
+            filter_sort_top_n(_priority_df, _pt, buy, int(min_oi), int(min_vol),
+                              int(top_n), min_ivpp, min_ann, min_percentile,
+                              min_ann_delta_percentile)
+            for _pt in _priority_types
+        ]
+        _priority_keys = [
+            (r["type"], r["strike"], r["expiration"])
+            for _slice in _priority_slices for _, r in _slice.iterrows()
+        ]
+        if _priority_keys:
+            _rows_to_block = iv_history.mc_rows_for_keys(
+                ticker_clean, _priority_keys).to_dict("records")
+            if _rows_to_block:
+                with st.spinner(
+                        f"Computing Monte Carlo for top {len(_rows_to_block)} "
+                        "pick(s)…"):
+                    mc_background.compute_now(_rows_to_block)
 
         # Persist the scan parameters for the Recent Scans dropdown.
         # Shared filters are saved for both flows so they can be fully
@@ -847,32 +887,30 @@ def tab_single() -> None:
                      "a row to simulate.",
         )
     else:
-        # Apply the EXACT same filters and ranking the "Top candidates"
-        # table uses, so the MC dropdown order matches the table order
-        # row-for-row. show_scan_results does:
-        #   1. filter to opt_type (or both)
-        #   2. require open_interest >= min_oi AND volume >= min_vol
-        #   3. sort by iv_excess (asc if buy / desc if sell), OI tie-break
-        #   4. head(top_n)
-        # Without these filters, the auto-filled top row could be a
-        # low-liquidity option the table itself hides.
-        if mode_r in ("call", "put"):
-            df_mc_base = df_filt[df_filt["type"] == mode_r]
-        else:
-            df_mc_base = df_filt
-        df_mc = (
-            df_mc_base[
-                (df_mc_base["open_interest"] >= res["min_oi"])
-                & (df_mc_base["volume"] >= res.get("min_vol", 0))
-            ]
-            .sort_values(
-                ["iv_excess", "open_interest"],
-                ascending=[buy_r, False],
-            )
-            .head(res["top_n"])
-            .reset_index(drop=True)
-            .copy()
+        # Apply the EXACT same filter/sort/top-N logic "Top candidates"
+        # uses (display/rank_filter.filter_sort_top_n — the same call
+        # show_scan_results makes), so the MC dropdown order matches the
+        # table order row-for-row. For "both" mode this means the same
+        # two per-type top-N cuts the table renders as two separate
+        # tables, concatenated — not one list pooled across both types
+        # and re-sorted, which could silently exclude an entire side.
+        _mc_kwargs = dict(
+            min_ivpp=res.get("min_ivpp"), min_ann=res.get("min_ann"),
+            min_percentile=res.get("min_percentile"),
+            min_ann_delta_percentile=res.get("min_ann_delta_percentile"),
         )
+        if mode_r in ("call", "put"):
+            df_mc = filter_sort_top_n(
+                df_filt, mode_r, buy_r, res["min_oi"], res.get("min_vol", 0),
+                res["top_n"], **_mc_kwargs)
+        else:
+            df_mc = pd.concat([
+                filter_sort_top_n(df_filt, "call", buy_r, res["min_oi"],
+                                  res.get("min_vol", 0), res["top_n"], **_mc_kwargs),
+                filter_sort_top_n(df_filt, "put", buy_r, res["min_oi"],
+                                  res.get("min_vol", 0), res["top_n"], **_mc_kwargs),
+            ])
+        df_mc = df_mc.reset_index(drop=True).copy()
         # Empty after filters → nothing to analyze. Surface the reason
         # explicitly rather than render an empty dropdown. Check BEFORE
         # the _label assignment below, since df.apply(..., axis=1) on an

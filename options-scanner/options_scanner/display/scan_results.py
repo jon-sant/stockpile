@@ -23,6 +23,7 @@ from options_scanner.format import EARNINGS_WARN_LEGEND, fmt_stars, fmt_strike, 
 from options_scanner.ui_theme import empty_state
 
 from options_scanner.display import mc_columns
+from options_scanner.display.rank_filter import filter_sort_top_n
 from options_scanner.display.chain_styling import (
     SPREAD_HELP,
     LAST_HELP,
@@ -268,27 +269,14 @@ def show_scan_results(df: pd.DataFrame, mode: str, buy: bool,
     historically rich for this ETF at this delta/DTE." All four default
     `None` (the UI default, left blank) meaning no filtering.
     """
-    iv_asc = buy
-    sort_col = "signal_score" if "signal_score" in df.columns else "iv_excess"
     type_labels = {"call": "Calls", "put": "Puts"}
     to_show = [mode] if mode in type_labels else list(type_labels.keys())
 
     for opt_type in to_show:
-        sub = (
-            df[df["type"] == opt_type]
-            .sort_values([sort_col, "open_interest"], ascending=[iv_asc, False])
+        sub = filter_sort_top_n(
+            df, opt_type, buy, min_oi, min_vol, top_n,
+            min_ivpp, min_ann, min_percentile, min_ann_delta_percentile,
         )
-        sub = sub[(sub["open_interest"] >= min_oi)
-                  & (sub["volume"] >= min_vol)]
-        if min_ivpp is not None:
-            sub = sub[(sub["iv_excess"] * 100) >= min_ivpp]
-        if min_ann is not None:
-            sub = sub[sub["ann_yield_pct"] >= min_ann]
-        if min_percentile is not None and "iv_percentile" in sub.columns:
-            sub = sub[sub["iv_percentile"] >= min_percentile]
-        if min_ann_delta_percentile is not None and "ann_delta_percentile" in sub.columns:
-            sub = sub[sub["ann_delta_percentile"] >= min_ann_delta_percentile]
-        sub = sub.head(top_n)
         sub = sub.copy()
         sub["_rank"] = range(1, len(sub) + 1)
         if len(to_show) > 1:

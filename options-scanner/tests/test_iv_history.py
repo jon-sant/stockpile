@@ -185,6 +185,56 @@ def test_pending_mc_rows_prioritizes_ticker():
     assert list(pending["ticker"])[:2] == ["TSLA", "TSLA"]
 
 
+def test_market_view_round_trip():
+    iv_history.record_scan("AMD", _snapshot(2), scan_day=date(2026, 7, 19),
+                           market_view="Bullish")
+    pending = iv_history.pending_mc_rows(limit=10)
+    assert list(pending["market_view"]) == ["Bullish", "Bullish"]
+
+
+def test_market_view_defaults_to_none():
+    iv_history.record_scan("AMD", _snapshot(2), scan_day=date(2026, 7, 19))
+    pending = iv_history.pending_mc_rows(limit=10)
+    assert pending["market_view"].isna().all()
+
+
+def test_legacy_rows_have_no_market_view():
+    iv_history.record_scan("AMD", _snapshot_legacy(2), scan_day=date(2026, 7, 19))
+    pending = iv_history.pending_mc_rows(limit=10)
+    assert pending["market_view"].isna().all()
+
+
+def test_mc_rows_for_keys_returns_exact_matches_only():
+    iv_history.record_scan("AMD", _snapshot(3), scan_day=date(2026, 7, 19),
+                           market_view="Bearish")
+    # _snapshot(3): strikes 100/101/102, all type "call", expiration 2026-06-19.
+    keys = [("call", 100.0, "2026-06-19"), ("call", 999.0, "2026-06-19")]
+    scoped = iv_history.mc_rows_for_keys("AMD", keys, scan_date=date(2026, 7, 19))
+    assert len(scoped) == 1
+    assert scoped.iloc[0]["strike"] == 100.0
+    assert scoped.iloc[0]["market_view"] == "Bearish"
+
+
+def test_mc_rows_for_keys_empty_keys_returns_empty():
+    iv_history.record_scan("AMD", _snapshot(2), scan_day=date(2026, 7, 19))
+    result = iv_history.mc_rows_for_keys("AMD", [], scan_date=date(2026, 7, 19))
+    assert result.empty
+
+
+def test_mc_rows_for_keys_excludes_already_done_rows():
+    iv_history.record_scan("AMD", _snapshot(2), scan_day=date(2026, 7, 19))
+    pending = iv_history.pending_mc_rows(limit=10)
+    rowid = int(pending.iloc[0]["rowid"])
+    results = {col: 1.0 for col in iv_history._MC_METRIC_COLS}
+    iv_history.record_mc_results(rowid, results, duration_ms=10.0)
+
+    keys = [("call", 100.0, "2026-06-19"), ("call", 101.0, "2026-06-19")]
+    scoped = iv_history.mc_rows_for_keys("AMD", keys, scan_date=date(2026, 7, 19))
+    # Row 0 (strike 100.0) is already done — only row 1 (still pending) comes back.
+    assert len(scoped) == 1
+    assert scoped.iloc[0]["strike"] == 101.0
+
+
 def test_schema_migration_preserves_existing_rows():
     # Simulate a pre-PR1 database: build the table with only the original
     # 7 columns, seed rows directly, then confirm _connect()'s ALTER TABLE

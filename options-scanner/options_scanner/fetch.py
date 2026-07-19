@@ -49,7 +49,8 @@ def _enrich(df: pd.DataFrame, ticker: str,
             surface_filters: SurfaceFilterConfig,
             algo_config: AlgorithmConfig,
             score_config: ScoreConfig,
-            star_score_config: ScoreConfig = STAR_DEFAULT) -> pd.DataFrame:
+            star_score_config: ScoreConfig = STAR_DEFAULT,
+            market_view: str | None = None) -> pd.DataFrame:
     """Annotate earnings, fit + score the surface, attach realized vol,
     and record the snapshot. Shared by both fetch helpers.
 
@@ -57,7 +58,14 @@ def _enrich(df: pd.DataFrame, ticker: str,
     independent of score_config (which drives table ranking/sort). Run
     as a second pass over iv_scores.score() reusing the same fit_mask/
     ctx compute_iv_excess already built, rather than duplicating the
-    surface fit."""
+    surface fit.
+
+    market_view is the outlook-card stance string (see
+    options_scanner.market_view.stance_for) for whichever tab/CLI
+    invocation is scanning — persisted per row so the background worker
+    can derive Monte Carlo drift from it later. Callers with no
+    buy/sell x calls/puts/both concept (GEX, Spreads) simply don't pass
+    it, leaving it None/NULL — resolves to no drift."""
     from options_scanner.iv_surface import compute_iv_excess
     from options_scanner.iv_scores import ScoreContext, score as _score_fn
     from options_scanner.earnings import fetch_earnings_dates, annotate_earnings
@@ -126,7 +134,8 @@ def _enrich(df: pd.DataFrame, ticker: str,
     # `earnings` is already fetch_earnings_dates()'s 0-or-1-element nearest-
     # future list — no need to re-derive "next" from it.
     earnings_next_date = earnings[0] if earnings else None
-    iv_history.record_scan(ticker, df, earnings_next_date=earnings_next_date)
+    iv_history.record_scan(ticker, df, earnings_next_date=earnings_next_date,
+                           market_view=market_view)
 
     # Prioritize this ticker's rows in the background MC worker — one
     # choke point for every tab's scan (single/watchlist/portfolio/gex/
@@ -164,7 +173,8 @@ def fetch_and_enrich(ticker: str, opt_type: str, min_dte: int,
                      score_config: ScoreConfig = SCORE_DEFAULT,
                      star_score_config: ScoreConfig = STAR_DEFAULT,
                      moomoo_config: dict | None = None,
-                     fit_both_sides: bool = True):
+                     fit_both_sides: bool = True,
+                     market_view: str | None = None):
     """Fetch + enrich a chain. With fit_both_sides (the default), a
     one-sided request ("calls"/"puts") still fetches BOTH sides so the IV
     surface is anchored on both wings of the smile, and the full two-sided
@@ -202,7 +212,7 @@ def fetch_and_enrich(ticker: str, opt_type: str, min_dte: int,
     if df.empty:
         return df, [], None
     df, earnings = _enrich(df, ticker, surface_filters, algo_config,
-                           score_config, star_score_config)
+                           score_config, star_score_config, market_view)
     return df, earnings, None
 
 
@@ -216,7 +226,8 @@ def fetch_position(ticker: str, min_dte: int, provider: str = "yahoo",
                    moomoo_config: dict | None = None,
                    fit_both_sides: bool = True,
                    opt_type: str = "calls",
-                   max_dte: int | None = 90):
+                   max_dte: int | None = 90,
+                   market_view: str | None = None):
     """Cached per-ticker chain fetch for portfolio tab.
 
     opt_type controls which side(s) are returned: "calls", "puts", or "both".
@@ -244,7 +255,7 @@ def fetch_position(ticker: str, min_dte: int, provider: str = "yahoo",
     if df.empty:
         return df, [], None
     df, earnings = _enrich(df, ticker, surface_filters, algo_config,
-                           score_config, star_score_config)
+                           score_config, star_score_config, market_view)
     if not df.empty and opt_type in ("calls", "puts"):
         side = "call" if opt_type == "calls" else "put"
         df = df[df["type"] == side].reset_index(drop=True)
@@ -299,7 +310,8 @@ def fetch_and_enrich_cached(ticker: str, opt_type: str, min_dte: int,
                             star_score_config: ScoreConfig = STAR_DEFAULT,
                             moomoo_config: dict | None = None,
                             fit_both_sides: bool = True,
-                            force_live: bool = False):
+                            force_live: bool = False,
+                            market_view: str | None = None):
     """Like fetch_and_enrich, but transparently serves a same-day
     background-scanned chain (see chain_cache.py / background_scan.py)
     instead of hitting the network when one covers the request — the
@@ -329,7 +341,7 @@ def fetch_and_enrich_cached(ticker: str, opt_type: str, min_dte: int,
     if df.empty:
         return df, [], None, from_cache, fetched_at
     df, earnings = _enrich(df, ticker, surface_filters, algo_config,
-                           score_config, star_score_config)
+                           score_config, star_score_config, market_view)
     return df, earnings, None, from_cache, fetched_at
 
 
@@ -343,7 +355,8 @@ def fetch_position_cached(ticker: str, min_dte: int, provider: str = "yahoo",
                           fit_both_sides: bool = True,
                           opt_type: str = "calls",
                           max_dte: int | None = 90,
-                          force_live: bool = False):
+                          force_live: bool = False,
+                          market_view: str | None = None):
     """Like fetch_position, but backed by the same persistent chain_cache
     as fetch_and_enrich_cached (see there for the caching rules).
     RateLimitError propagates uncached, same as fetch_position, so
@@ -368,7 +381,7 @@ def fetch_position_cached(ticker: str, min_dte: int, provider: str = "yahoo",
     if df.empty:
         return df, [], None, from_cache, fetched_at
     df, earnings = _enrich(df, ticker, surface_filters, algo_config,
-                           score_config, star_score_config)
+                           score_config, star_score_config, market_view)
     if not df.empty and opt_type in ("calls", "puts"):
         side = "call" if opt_type == "calls" else "put"
         df = df[df["type"] == side].reset_index(drop=True)

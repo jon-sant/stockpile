@@ -248,7 +248,16 @@ def _scan_one(ticker: str, args, opt_type_fetch: str, mode: str,
     # CLI-scanned rows would carry spot but no earnings context for a
     # later background Monte Carlo pass.
     earnings_next_date = earnings_dates[0] if earnings_dates else None
-    iv_history.record_scan(ticker, df, earnings_next_date=earnings_next_date)
+    # mode is already "call"/"put"/"both" (resolved from --calls/--puts/
+    # --both before _scan_one is called) — same vocabulary market_view.
+    # stance_for() needs, just Title-cased. The CLI parser already
+    # rejects --both combined with --buy, so args.buy is well-defined
+    # (always False) whenever mode == "both".
+    from options_scanner.market_view import stance_for
+    opt_type_label = {"call": "Calls", "put": "Puts", "both": "Both"}[mode]
+    market_view_stance = stance_for(args.buy, opt_type_label)
+    iv_history.record_scan(ticker, df, earnings_next_date=earnings_next_date,
+                           market_view=market_view_stance)
 
     spot = float(df["spot"].iloc[0])
 

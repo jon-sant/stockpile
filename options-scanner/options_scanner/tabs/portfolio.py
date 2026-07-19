@@ -34,6 +34,7 @@ from options_scanner.compute import capital_allocator, correlation
 from options_scanner.display.iv_chart import show_iv_chart
 from options_scanner.display.leaderboard import build_leaderboard, render_leaderboard
 from options_scanner.display.portfolio_action_card import render_portfolio_action_card
+from options_scanner.display.rank_filter import filter_sort_top_n
 from options_scanner.display.scan_results import show_scan_results
 from options_scanner.display.spot_meta import (
     fetch_spot_meta,
@@ -41,8 +42,9 @@ from options_scanner.display.spot_meta import (
     spot_value_html,
 )
 from options_scanner.defaults import default_delta_range
-from options_scanner import chain_cache
+from options_scanner import chain_cache, iv_history, mc_background
 from options_scanner.fetch import fetch_position_cached
+from options_scanner.market_view import stance_for
 from options_scanner.portfolio import detect_brokerage
 from options_scanner.ui_theme import (
     badge, metric_card, render_schwab_reauth_hint, section_header,
@@ -203,7 +205,8 @@ def _parse_watchlist(text: str) -> list[str]:
 def _scan_one(pos: dict, opt_type_key: str, scan_mode_key: str,
               provider: str, scfg: dict | None,
               min_dte: int, max_dte: int,
-              force_live: bool = True) -> dict:
+              force_live: bool = True,
+              market_view: str | None = None) -> dict:
     """Fetch + enrich one position and build its result dict.
 
     Shared by both input sources. Watchlist tickers pass a synthetic
@@ -226,6 +229,7 @@ def _scan_one(pos: dict, opt_type_key: str, scan_mode_key: str,
         opt_type=opt_type_key,
         max_dte=int(max_dte),
         force_live=force_live,
+        market_view=market_view,
     )
 
     # Roll close cost lookup — only in Roll mode, only for open options
@@ -285,7 +289,8 @@ def _scan_one(pos: dict, opt_type_key: str, scan_mode_key: str,
 def _scan_all_parallel(positions: list, opt_type_key: str,
                        scan_mode_key: str, provider: str,
                        scfg: dict | None, min_dte: int, max_dte: int,
-                       progress, force_live: bool = True) -> list:
+                       progress, force_live: bool = True,
+                       market_view: str | None = None) -> list:
     """Scan every position concurrently (yahoo-headless only).
 
     The headless provider keeps a bounded pool of long-lived browsers,
@@ -310,7 +315,8 @@ def _scan_all_parallel(positions: list, opt_type_key: str,
     def _job(pos):
         try:
             return _scan_one(pos, opt_type_key, scan_mode_key, provider,
-                             scfg, min_dte, max_dte, force_live=force_live)
+                             scfg, min_dte, max_dte, force_live=force_live,
+                             market_view=market_view)
         except Exception as exc:  # noqa: BLE001 — degrade to an error card
             return {"position": pos, "error": f"{type(exc).__name__}: {exc}",
                     "df": pd.DataFrame(), "spot": None,
@@ -792,6 +798,15 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
         st.success(f"Found {len(positions)} position(s): "
                    f"{', '.join(p['ticker'] for p in positions)}")
 
+        # opt_type_label is already "Calls"/"Puts"/"Both" — the exact
+        # vocabulary options_scanner.market_view.OUTLOOK_TABLE uses, same
+        # as tabs/single.py. Roll mode isn't a fresh directional bet in
+        # that sense either, but unlike single.py's roll flow this tab's
+        # buy/opt_type_label widgets stay meaningful in Roll mode (roll
+        # candidates are still ranked by the same Sell/Buy x Calls/Puts/
+        # Both framing), so no special-casing needed here.
+        market_view_stance = stance_for(buy, opt_type_label)
+
         progress = st.progress(0, text="Scanning…")
         results = []
         rl_give_up = False  # a wait didn't clear the throttle → stop waiting
@@ -801,7 +816,7 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
             results = _scan_all_parallel(
                 positions, opt_type_key, scan_mode_key, _provider, _scfg,
                 int(port_min_dte), int(port_max_dte), progress,
-                force_live=False)
+                force_live=False, market_view=market_view_stance)
             positions = []  # skip the sequential loop below
         for i, pos in enumerate(positions):
             pct = (i + 1) / len(positions)
@@ -813,7 +828,7 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
                     res = _scan_one(
                         pos, opt_type_key, scan_mode_key, _provider, _scfg,
                         int(port_min_dte), int(port_max_dte),
-                        force_live=False,
+                        force_live=False, market_view=market_view_stance,
                     )
                     break
                 except RateLimitError as exc:
@@ -853,6 +868,54 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
             "scan_mode": scan_mode_key,
             "buy": buy,
         }
+
+        # Block until the rows about to be shown — the leaderboard's
+        # per-side top-N cut (build_leaderboard) and each position's own
+        # per-position table (display/rank_filter.filter_sort_top_n,
+        # same cut show_scan_results is about to render) — have real
+        # Monte Carlo values instead of "TBD". Spans every scanned
+        # ticker, not just one. mc_background.compute_now() times out
+        # gracefully and leaves any remainder pending for the normal
+        # async worker, so this never hangs the UI indefinitely.
+        _side = {"calls": "call", "puts": "put", "both": "both"}[opt_type_key]
+        _sides = [_side] if _side in ("call", "put") else ["call", "put"]
+        _priority_keys_by_ticker: dict[str, list[tuple]] = {}
+
+        def _add_keys(tk: str, df_slice: pd.DataFrame) -> None:
+            _priority_keys_by_ticker.setdefault(tk, []).extend(
+                (r["type"], r["strike"], r["expiration"])
+                for _, r in df_slice.iterrows())
+
+        for _s in _sides:
+            _board = build_leaderboard(
+                results, _s, int(port_min_oi), int(port_top), int(port_min_vol),
+                delta_range=port_delta_range, buy=buy,
+                min_ivpp=port_min_ivpp, min_ann=port_min_ann,
+                min_percentile=port_min_percentile,
+                min_ann_delta_percentile=port_min_ann_delta_percentile,
+            )
+            if not _board.empty:
+                for _tk, _tk_df in _board.groupby("ticker"):
+                    _add_keys(_tk, _tk_df)
+            for _res in results:
+                _res_df = _res.get("df")
+                if _res.get("error") or _res_df is None or _res_df.empty:
+                    continue
+                _add_keys(_res["position"]["ticker"], filter_sort_top_n(
+                    _res_df, _s, buy, int(port_min_oi), int(port_min_vol),
+                    int(port_top), port_min_ivpp, port_min_ann,
+                    port_min_percentile, port_min_ann_delta_percentile))
+
+        _rows_to_block = []
+        for _tk, _keys in _priority_keys_by_ticker.items():
+            if _keys:
+                _rows_to_block.extend(
+                    iv_history.mc_rows_for_keys(_tk, _keys).to_dict("records"))
+        if _rows_to_block:
+            with st.spinner(
+                    f"Computing Monte Carlo for top {len(_rows_to_block)} "
+                    "pick(s)…"):
+                mc_background.compute_now(_rows_to_block)
 
     # ── Render stored results (survives widget interactions / re-runs) ────────
     stored = st.session_state.get(_results_key)
