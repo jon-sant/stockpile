@@ -28,7 +28,7 @@ reported alongside it (each failed spawn attempt partially re-imports
 the host process). Threads avoid all of this: no new OS process, no
 re-import of anything.
 
-Poll interval is short (~20s, vs. background_scan's hourly poll) and can
+Poll interval is short (~1s, vs. background_scan's hourly poll) and can
 be woken early via `restart_with_priority()` right after any tab
 finishes a scan — that also discards any queued-but-not-yet-started
 low-priority batches (recreating the pool) so the just-scanned ticker's
@@ -58,7 +58,7 @@ log = logging.getLogger(__name__)
 
 _BATCH_SIZE = 25       # rows per executor task — amortizes dispatch overhead
 _ROWS_PER_POLL = 200   # pending rows pulled and split into batches per tick
-_POLL_SECONDS = 20     # short poll so a fresh scan feels responsive
+_POLL_SECONDS = 1      # short poll so a fresh scan feels responsive
 _POOL_MULTIPLIER = 10  # threads are cheap (see module docstring) — spare capacity is fine
 
 _lock = threading.Lock()
