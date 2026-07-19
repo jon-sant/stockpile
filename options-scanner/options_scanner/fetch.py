@@ -28,6 +28,7 @@ established convention in this codebase.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 
 import numpy as np
@@ -36,18 +37,29 @@ import streamlit as st
 
 from options_scanner.iv_algorithms import DEFAULT_CONFIG as ALGO_DEFAULT, AlgorithmConfig
 from options_scanner.iv_filters import DEFAULT_CONFIG, SurfaceFilterConfig
-from options_scanner.iv_scores import DEFAULT_CONFIG as SCORE_DEFAULT, ScoreConfig
+from options_scanner.iv_scores import (
+    DEFAULT_CONFIG as SCORE_DEFAULT, STAR_DEFAULT, ScoreConfig,
+)
 from stocks_shared.yahoo import RateLimitError, is_rate_limit_error
+
+log = logging.getLogger(__name__)
 
 
 def _enrich(df: pd.DataFrame, ticker: str,
             surface_filters: SurfaceFilterConfig,
             algo_config: AlgorithmConfig,
-            score_config: ScoreConfig) -> pd.DataFrame:
+            score_config: ScoreConfig,
+            star_score_config: ScoreConfig = STAR_DEFAULT) -> pd.DataFrame:
     """Annotate earnings, fit + score the surface, attach realized vol,
-    and record the snapshot. Shared by both fetch helpers."""
+    and record the snapshot. Shared by both fetch helpers.
+
+    star_score_config picks the ranking key behind the ★ star rating —
+    independent of score_config (which drives table ranking/sort). Run
+    as a second pass over iv_scores.score() reusing the same fit_mask/
+    ctx compute_iv_excess already built, rather than duplicating the
+    surface fit."""
     from options_scanner.iv_surface import compute_iv_excess
-    from options_scanner.iv_scores import ScoreContext
+    from options_scanner.iv_scores import ScoreContext, score as _score_fn
     from options_scanner.earnings import fetch_earnings_dates, annotate_earnings
     from options_scanner import iv_history
     from stocks_shared.yahoo import realized_vol
@@ -61,6 +73,11 @@ def _enrich(df: pd.DataFrame, ticker: str,
         df, surface_filters=surface_filters, algo_config=algo_config,
         score_config=score_config, ctx=ctx,
     )
+
+    star_signal, star_kind = _score_fn(
+        df, df["in_fit"].to_numpy(dtype=bool), ctx, star_score_config)
+    df["star_score"] = star_signal
+    df["star_kind"] = star_kind
 
     df["hv_20"] = hv
     df["vr_ratio"] = (df["iv"] / hv) if (np.isfinite(hv) and hv > 0) \
@@ -106,7 +123,35 @@ def _enrich(df: pd.DataFrame, ticker: str,
     df["iv_rank_date_from"] = _iv_rank_from.isoformat() if _iv_rank_from else None
     df["iv_rank_date_to"] = _iv_rank_to.isoformat() if _iv_rank_to else None
 
-    iv_history.record_scan(ticker, df)
+    # `earnings` is already fetch_earnings_dates()'s 0-or-1-element nearest-
+    # future list — no need to re-derive "next" from it.
+    earnings_next_date = earnings[0] if earnings else None
+    iv_history.record_scan(ticker, df, earnings_next_date=earnings_next_date)
+
+    # Prioritize this ticker's rows in the background MC worker — one
+    # choke point for every tab's scan (single/watchlist/portfolio/gex/
+    # spreads all funnel through _enrich), so no per-tab wiring needed.
+    # Never let a worker hiccup break a live scan.
+    try:
+        from options_scanner import mc_background
+        mc_background.restart_with_priority(ticker)
+    except Exception:
+        log.exception("mc_background: restart_with_priority failed for %s", ticker)
+
+    # Attach today's Monte Carlo columns (mc_status + the 14 mc_* metric
+    # columns) back onto the freshly-recorded rows. On a brand-new scan
+    # every row will be mc_status IS NULL ("TBD" in the UI) since the
+    # background worker hasn't caught up yet; a same-day rescan may
+    # already carry real values if the worker ran in between.
+    mc = iv_history.mc_results_for(ticker)
+    if not mc.empty:
+        df = df.merge(
+            mc, on=["type", "strike", "expiration"], how="left", validate="m:1")
+    else:
+        df["mc_status"] = None
+        for col in iv_history._MC_METRIC_COLS:
+            df[col] = float("nan")
+
     return df, earnings
 
 
@@ -117,6 +162,7 @@ def fetch_and_enrich(ticker: str, opt_type: str, min_dte: int,
                      surface_filters: SurfaceFilterConfig = DEFAULT_CONFIG,
                      algo_config: AlgorithmConfig = ALGO_DEFAULT,
                      score_config: ScoreConfig = SCORE_DEFAULT,
+                     star_score_config: ScoreConfig = STAR_DEFAULT,
                      moomoo_config: dict | None = None,
                      fit_both_sides: bool = True):
     """Fetch + enrich a chain. With fit_both_sides (the default), a
@@ -156,7 +202,7 @@ def fetch_and_enrich(ticker: str, opt_type: str, min_dte: int,
     if df.empty:
         return df, [], None
     df, earnings = _enrich(df, ticker, surface_filters, algo_config,
-                           score_config)
+                           score_config, star_score_config)
     return df, earnings, None
 
 
@@ -166,6 +212,7 @@ def fetch_position(ticker: str, min_dte: int, provider: str = "yahoo",
                    surface_filters: SurfaceFilterConfig = DEFAULT_CONFIG,
                    algo_config: AlgorithmConfig = ALGO_DEFAULT,
                    score_config: ScoreConfig = SCORE_DEFAULT,
+                   star_score_config: ScoreConfig = STAR_DEFAULT,
                    moomoo_config: dict | None = None,
                    fit_both_sides: bool = True,
                    opt_type: str = "calls",
@@ -197,7 +244,7 @@ def fetch_position(ticker: str, min_dte: int, provider: str = "yahoo",
     if df.empty:
         return df, [], None
     df, earnings = _enrich(df, ticker, surface_filters, algo_config,
-                           score_config)
+                           score_config, star_score_config)
     if not df.empty and opt_type in ("calls", "puts"):
         side = "call" if opt_type == "calls" else "put"
         df = df[df["type"] == side].reset_index(drop=True)
@@ -230,8 +277,10 @@ def _fetch_chain_with_cache(ticker: str, opt_type: str, min_dte: int,
         cached = chain_cache.load_snapshot(ticker, min_dte, max_dte, provider)
         if cached is not None:
             df, fetched_at = cached
+            log.info("[chain] %s: local cache hit, provider=%s", ticker, provider)
             return df, fetched_at, True
 
+    log.info("[chain] %s: fetching online, provider=%s", ticker, provider)
     df = fetch_chain(ticker, opt_type=fetch_type, min_dte=min_dte,
                      max_dte=max_dte, provider=provider,
                      schwab_config=schwab_config, moomoo_config=moomoo_config)
@@ -247,6 +296,7 @@ def fetch_and_enrich_cached(ticker: str, opt_type: str, min_dte: int,
                             surface_filters: SurfaceFilterConfig = DEFAULT_CONFIG,
                             algo_config: AlgorithmConfig = ALGO_DEFAULT,
                             score_config: ScoreConfig = SCORE_DEFAULT,
+                            star_score_config: ScoreConfig = STAR_DEFAULT,
                             moomoo_config: dict | None = None,
                             fit_both_sides: bool = True,
                             force_live: bool = False):
@@ -279,7 +329,7 @@ def fetch_and_enrich_cached(ticker: str, opt_type: str, min_dte: int,
     if df.empty:
         return df, [], None, from_cache, fetched_at
     df, earnings = _enrich(df, ticker, surface_filters, algo_config,
-                           score_config)
+                           score_config, star_score_config)
     return df, earnings, None, from_cache, fetched_at
 
 
@@ -288,6 +338,7 @@ def fetch_position_cached(ticker: str, min_dte: int, provider: str = "yahoo",
                           surface_filters: SurfaceFilterConfig = DEFAULT_CONFIG,
                           algo_config: AlgorithmConfig = ALGO_DEFAULT,
                           score_config: ScoreConfig = SCORE_DEFAULT,
+                          star_score_config: ScoreConfig = STAR_DEFAULT,
                           moomoo_config: dict | None = None,
                           fit_both_sides: bool = True,
                           opt_type: str = "calls",
@@ -317,7 +368,7 @@ def fetch_position_cached(ticker: str, min_dte: int, provider: str = "yahoo",
     if df.empty:
         return df, [], None, from_cache, fetched_at
     df, earnings = _enrich(df, ticker, surface_filters, algo_config,
-                           score_config)
+                           score_config, star_score_config)
     if not df.empty and opt_type in ("calls", "puts"):
         side = "call" if opt_type == "calls" else "put"
         df = df[df["type"] == side].reset_index(drop=True)

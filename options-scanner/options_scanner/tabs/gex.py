@@ -201,7 +201,7 @@ def tab_gex() -> None:
                 _fetch_provider,
                 st.session_state.get("schwab_config"),
                 moomoo_config=st.session_state.get("moomoo_config"),
-                force_live=not _was_auto_populate,
+                force_live=False,
             )
             _any_from_cache = _any_from_cache or from_cache
             _last_fetched_at = fetched_at or _last_fetched_at

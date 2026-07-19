@@ -21,6 +21,7 @@ import streamlit as st
 
 from options_scanner import iv_scores
 from options_scanner.format import EARNINGS_WARN_LEGEND, fmt_stars, fmt_strike, stars_for
+from options_scanner.display import mc_columns
 from options_scanner.display.scan_stamp import stamp_caption
 
 
@@ -617,7 +618,8 @@ def render_leaderboard(results: list[dict], mode: str, min_oi: int,
                        min_ivpp: float | None = None,
                        min_ann: float | None = None,
                        min_percentile: float | None = None,
-                       min_ann_delta_percentile: float | None = None) -> None:
+                       min_ann_delta_percentile: float | None = None,
+                       show_mc: bool = False) -> None:
     """Render the cross-ticker leaderboard table(s).
 
     `mode` is "call", "put", or "both" (both renders a Calls and a Puts
@@ -656,7 +658,8 @@ def render_leaderboard(results: list[dict], mode: str, min_oi: int,
         _render_table(board, side, min_vol,
                       investigate=(allow_investigate and side == "put"),
                       min_oi=min_oi, top_n=top_n, ticker_dfs=ticker_dfs,
-                      ticker_earnings=ticker_earnings, provider=provider)
+                      ticker_earnings=ticker_earnings, provider=provider,
+                      buy=buy, show_mc=show_mc)
 
     if not rendered_any:
         st.info(
@@ -716,7 +719,8 @@ def _render_table(board: pd.DataFrame, side: str, min_vol: int,
                   investigate: bool = False, min_oi: int = 25, top_n: int = 5,
                   ticker_dfs: dict | None = None,
                   ticker_earnings: dict | None = None,
-                  provider: str = "yahoo") -> None:
+                  provider: str = "yahoo",
+                  buy: bool = False, show_mc: bool = False) -> None:
     """Render one leaderboard table, styled like the scan-results table.
 
     When `investigate` is True the table becomes single-row-selectable and
@@ -725,6 +729,7 @@ def _render_table(board: pd.DataFrame, side: str, min_vol: int,
     supplies the next-earnings date shown in its snapshot.
     """
     kind = iv_scores.active_kind(board)
+    star_kind = iv_scores.active_star_kind(board)
 
     # ⚠ in the Expiration cell = short-dated (≤60 DTE) and expiring after the
     # next earnings — its IV+pp carries event premium and it's the slice
@@ -780,9 +785,12 @@ def _render_table(board: pd.DataFrame, side: str, min_vol: int,
     if kind != "IV+pp":
         mult, _ = iv_scores.display_for(kind)
         cols[kind] = (board["signal_score"] * mult).round(2)
-    cols["★"] = [fmt_stars(s) for s in stars_for(board["signal_score"])]
+    _star_scores = (board["star_score"] if "star_score" in board.columns
+                    else board["signal_score"])
+    cols["★"] = [fmt_stars(s) for s in stars_for(_star_scores)]
     cols.update({
         "Delta": board["delta"].round(2),
+        "Exp P&L": mc_columns.exp_pnl_column(board, buy),
         "Ann%":  board["ann_yield_pct"].round(1),
         "Ann% / Delta": (board["ann_yield_pct"]
                          / board["delta"].abs().replace(0, float("nan"))).round(1),
@@ -790,6 +798,8 @@ def _render_table(board: pd.DataFrame, side: str, min_vol: int,
         "OI":    board["open_interest"],
         "Vol":   board["volume"],
     })
+    if show_mc:
+        cols.update(mc_columns.mc_extra_columns(board, buy))
     disp = pd.DataFrame(cols)
 
     # Shade each ticker's #1 pick so it stands out from its fill rows.
@@ -822,12 +832,15 @@ def _render_table(board: pd.DataFrame, side: str, min_vol: int,
             "IV Rank", format="%.0f", width=75, help=_iv_rank_help(board)),
         "★": st.column_config.TextColumn(
             "★", width=70,
-            help="Star rating: percentile rank of the active ranking "
-                 "score within this table, mapped to 0-5 stars at "
-                 "half-star resolution. Most meaningful when Composite "
-                 "v2 is the active score."),
+            help=f"Star rating: percentile rank of the {star_kind} score "
+                 "within this table, mapped to 0-5 stars at half-star "
+                 "resolution. Independent of the ranking/sort column above "
+                 "— set via the Stars (ranking key) dropdown in Advanced "
+                 "surface fit."),
         "Delta": st.column_config.NumberColumn("Delta", format="%.2f",
                                                width=60),
+        "Exp P&L": st.column_config.TextColumn(
+            "Exp P&L", width=85, help=mc_columns.exp_pnl_help()),
         "Ann%":  st.column_config.NumberColumn("Ann%", format="%.1f%%",
                                                width=65),
         "Ann% / Delta": st.column_config.NumberColumn(
@@ -843,6 +856,11 @@ def _render_table(board: pd.DataFrame, side: str, min_vol: int,
         "OI":    st.column_config.NumberColumn("OI", format="%d", width=65),
         "Vol":   st.column_config.NumberColumn("Vol", format="%d", width=65),
     }
+    if show_mc:
+        col_cfg.update({
+            label: st.column_config.TextColumn(label, width=90, help=help_text)
+            for label, help_text in mc_columns.mc_extra_help().items()
+        })
     if kind != "IV+pp":
         _, fmt = iv_scores.display_for(kind)
         col_cfg[kind] = st.column_config.NumberColumn(

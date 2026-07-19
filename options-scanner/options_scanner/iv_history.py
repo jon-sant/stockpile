@@ -37,7 +37,32 @@ _DEFAULT_DB = Path(__file__).resolve().parent.parent / "cache" / "iv_history.db"
 _MIN_HISTORY = 30          # pooled observations required before percentiles mean anything
 _MIN_HISTORY_BUCKETED = 15  # lower bar per delta×DTE bucket — same-bucket obs are scarcer
 _REQUIRED_COLS = ("type", "strike", "expiration", "dte", "iv_excess")
-_NEW_COLS = ("mid", "delta", "ann_yield_pct", "iv")  # added post-launch; nullable for old rows
+# Added post-launch; nullable for old rows. (name, sql_type) so TEXT columns
+# (mc_status etc.) don't get forced into REAL by the old plain-tuple form.
+_NEW_COLS: tuple[tuple[str, str], ...] = (
+    ("mid", "REAL"), ("delta", "REAL"), ("ann_yield_pct", "REAL"), ("iv", "REAL"),
+    ("open_interest", "REAL"), ("volume", "REAL"),
+    # Monte Carlo inputs — needed to rebuild a Position from a stored row
+    # later (the live scan's df has these, but nothing persisted them
+    # until now).
+    ("spot", "REAL"), ("earnings_next_date", "TEXT"),
+    # Monte Carlo status/metadata. mc_status NULL == pending — every
+    # pre-existing row is implicitly pending the moment this column
+    # exists, no backfill UPDATE needed.
+    ("mc_status", "TEXT"), ("mc_computed_at", "TEXT"),
+    ("mc_duration_ms", "REAL"), ("mc_error", "TEXT"),
+    # Monte Carlo results — side-invariant (contract properties, not
+    # duplicated per buy/sell).
+    ("mc_fair_value", "REAL"), ("mc_breakeven_move_pct", "REAL"),
+    # Monte Carlo results — side-asymmetric (P&L-shaped metrics that
+    # genuinely differ between holding the contract long vs. short).
+    ("mc_prob_profit_buy", "REAL"), ("mc_prob_profit_sell", "REAL"),
+    ("mc_expected_pnl_buy", "REAL"), ("mc_expected_pnl_sell", "REAL"),
+    ("mc_cvar5_buy", "REAL"), ("mc_cvar5_sell", "REAL"),
+    ("mc_var5_buy", "REAL"), ("mc_var5_sell", "REAL"),
+    ("mc_sortino_buy", "REAL"), ("mc_sortino_sell", "REAL"),
+    ("mc_edge_vs_market_buy", "REAL"), ("mc_edge_vs_market_sell", "REAL"),
+)
 
 _IV_RANK_WINDOW_DAYS = 365  # cap on how far back IV Rank looks
 _IV_RANK_MIN_DAYS = 2       # need >=1 prior day + today to form a min/max range
@@ -87,18 +112,26 @@ def _connect() -> Generator[sqlite3.Connection]:
             "ON iv_history (ticker, scan_date)"
         )
         existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(iv_history)")}
-        for col in _NEW_COLS:
+        for col, sql_type in _NEW_COLS:
             if col not in existing_cols:
-                conn.execute(f"ALTER TABLE iv_history ADD COLUMN {col} REAL")
+                conn.execute(f"ALTER TABLE iv_history ADD COLUMN {col} {sql_type}")
         yield conn
 
 
 def record_scan(ticker: str, df: pd.DataFrame,
-                scan_day: date | None = None) -> None:
+                scan_day: date | None = None,
+                earnings_next_date: date | None = None) -> None:
     """Persist today's chain snapshot for `ticker` (idempotent per day).
 
     No-op if df is empty or missing the columns we record — keeps the
     store from ever breaking a scan.
+
+    `earnings_next_date` is ticker-level (broadcast to every row, like
+    `spot` already is per-row on `df`) — both are Monte Carlo inputs the
+    background worker needs to rebuild a Position later, since the live
+    df is gone by the time it runs. Rows recorded here never get their
+    `mc_*` result columns filled in directly — those start implicitly
+    pending (`mc_status IS NULL`) and are filled in later by the worker.
     """
     if df is None or df.empty or not ticker:
         return
@@ -106,6 +139,7 @@ def record_scan(ticker: str, df: pd.DataFrame,
         return
     scan_date = (scan_day or date.today()).isoformat()
     ticker = ticker.upper()
+    earnings_next_iso = earnings_next_date.isoformat() if earnings_next_date else None
 
     def _opt(col: str, r) -> float | None:
         if col not in df.columns:
@@ -117,7 +151,8 @@ def record_scan(ticker: str, df: pd.DataFrame,
         (ticker, scan_date, str(r["type"]), float(r["strike"]),
          str(r["expiration"]), int(r["dte"]), float(r["iv_excess"]),
          _opt("mid", r), _opt("delta", r), _opt("ann_yield_pct", r),
-         _opt("iv", r))
+         _opt("iv", r), _opt("open_interest", r), _opt("volume", r),
+         _opt("spot", r), earnings_next_iso)
         for _, r in df.iterrows()
         if pd.notna(r["iv_excess"])
     ]
@@ -132,8 +167,9 @@ def record_scan(ticker: str, df: pd.DataFrame,
             conn.executemany(
                 "INSERT INTO iv_history "
                 "(ticker, scan_date, type, strike, expiration, dte, iv_excess, "
-                " mid, delta, ann_yield_pct, iv) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " mid, delta, ann_yield_pct, iv, open_interest, volume, "
+                " spot, earnings_next_date) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
     except sqlite3.Error:
@@ -209,6 +245,108 @@ def _bucketed_percentile(ticker: str, values, deltas, dtes,
     return out
 
 
+# The 14 Monte Carlo metric columns — exactly the keys mc_batch.py's
+# compute_mc_for_row() returns, and exactly what record_mc_results() writes.
+_MC_METRIC_COLS = (
+    "mc_fair_value", "mc_breakeven_move_pct",
+    "mc_prob_profit_buy", "mc_prob_profit_sell",
+    "mc_expected_pnl_buy", "mc_expected_pnl_sell",
+    "mc_cvar5_buy", "mc_cvar5_sell",
+    "mc_var5_buy", "mc_var5_sell",
+    "mc_sortino_buy", "mc_sortino_sell",
+    "mc_edge_vs_market_buy", "mc_edge_vs_market_sell",
+)
+
+
+def mc_results_for(ticker: str, scan_date: date | None = None) -> pd.DataFrame:
+    """MC status + result columns for every (type, strike, expiration) row
+    recorded for `ticker` on `scan_date` (default today).
+
+    Used by fetch.py to attach already-computed MC metrics back onto a
+    freshly-scanned chain. On a brand-new scan every row will show
+    mc_status IS NULL (pending — the UI renders this as "TBD") since the
+    background worker hasn't caught up yet; a same-day rescan may already
+    carry real values if the worker ran in between.
+    """
+    scan_date_iso = (scan_date or date.today()).isoformat()
+    cols = ["type", "strike", "expiration", "mc_status", *_MC_METRIC_COLS]
+    try:
+        with _connect() as conn:
+            df = pd.read_sql_query(
+                "SELECT type, strike, expiration, mc_status, "
+                + ", ".join(_MC_METRIC_COLS)
+                + " FROM iv_history WHERE ticker = ? AND scan_date = ?",
+                conn, params=(ticker.upper(), scan_date_iso),
+            )
+    except sqlite3.Error:
+        return pd.DataFrame(columns=cols)
+    return df
+
+
+def pending_mc_rows(limit: int, priority_ticker: str | None = None) -> pd.DataFrame:
+    """Rows still needing Monte Carlo computation (mc_status IS NULL), up
+    to `limit`, ordered so `priority_ticker`'s rows (if any) come first —
+    lets the background worker prioritize whatever the user just scanned
+    without a separate priority column on every row.
+
+    `rowid` (SQLite's implicit row identifier) is the update handle for
+    `record_mc_results`/`record_mc_error` — avoids reconstructing a
+    composite (ticker, scan_date, type, strike, expiration) WHERE clause.
+    """
+    cols = ["rowid", "ticker", "scan_date", "type", "strike", "expiration",
+            "dte", "mid", "iv", "spot", "earnings_next_date"]
+    try:
+        with _connect() as conn:
+            df = pd.read_sql_query(
+                "SELECT rowid, ticker, scan_date, type, strike, expiration, "
+                "       dte, mid, iv, spot, earnings_next_date "
+                "FROM iv_history WHERE mc_status IS NULL "
+                "ORDER BY (ticker = ?) DESC, scan_date DESC LIMIT ?",
+                conn, params=(priority_ticker.upper() if priority_ticker else "", limit),
+            )
+    except sqlite3.Error:
+        return pd.DataFrame(columns=cols)
+    return df
+
+
+def record_mc_results(rowid: int, results: dict[str, float],
+                       duration_ms: float) -> None:
+    """Persist a completed Monte Carlo computation for one row (matched by
+    SQLite rowid, from `pending_mc_rows`). Sets mc_status='done'. Fails
+    open — a storage error here must never crash the background worker.
+    """
+    set_clause = ", ".join(f"{col} = ?" for col in _MC_METRIC_COLS)
+    try:
+        with _connect() as conn:
+            conn.execute(
+                "UPDATE iv_history SET mc_status = 'done', "
+                f"mc_computed_at = ?, mc_duration_ms = ?, {set_clause} "
+                "WHERE rowid = ?",
+                (
+                    datetime.now().astimezone().isoformat(),
+                    duration_ms,
+                    *(results.get(col) for col in _MC_METRIC_COLS),
+                    rowid,
+                ),
+            )
+    except sqlite3.Error:
+        return
+
+
+def record_mc_error(rowid: int, error: str) -> None:
+    """Mark one row's Monte Carlo computation as failed (matched by
+    rowid). Fails open, same as record_mc_results."""
+    try:
+        with _connect() as conn:
+            conn.execute(
+                "UPDATE iv_history SET mc_status = 'error', mc_error = ? "
+                "WHERE rowid = ?",
+                (error, rowid),
+            )
+    except sqlite3.Error:
+        return
+
+
 def history_for(ticker: str, window_days: int = 30) -> pd.DataFrame:
     """Raw trailing-window scan-history rows for `ticker`.
 
@@ -219,12 +357,12 @@ def history_for(ticker: str, window_days: int = 30) -> pd.DataFrame:
     """
     cutoff = (date.today() - timedelta(days=window_days)).isoformat()
     cols = ["scan_date", "type", "strike", "expiration", "dte", "iv_excess",
-            "mid", "delta", "ann_yield_pct"]
+            "mid", "delta", "ann_yield_pct", "iv", "open_interest", "volume"]
     try:
         with _connect() as conn:
             df = pd.read_sql_query(
                 "SELECT scan_date, type, strike, expiration, dte, iv_excess, "
-                "       mid, delta, ann_yield_pct "
+                "       mid, delta, ann_yield_pct, iv, open_interest, volume "
                 "FROM iv_history WHERE ticker = ? AND scan_date >= ? "
                 "ORDER BY scan_date, type, strike",
                 conn, params=(ticker.upper(), cutoff),

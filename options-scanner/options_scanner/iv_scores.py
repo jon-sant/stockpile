@@ -260,6 +260,12 @@ REGISTRY: dict[str, dict] = {
 # Default: raw IV+pp — reproduces current ranking exactly.
 DEFAULT_CONFIG: ScoreConfig = ("raw_pp", frozenset())
 
+# Default ranking key for the ★ star rating — independent of DEFAULT_CONFIG
+# (which drives table ranking/sort). Composite v2 blends Ann/Δ, IV
+# percentile, liquidity, and GEX, so stars stay meaningful even when the
+# active ranking score is something narrow like raw IV+pp.
+STAR_DEFAULT: ScoreConfig = ("composite_v2", frozenset())
+
 # Per-label display spec: (multiplier applied to signal_score, column format).
 # Keyed by the short label each score returns.
 # ASCII-only formats — these feed both Streamlit column_config and the
@@ -286,6 +292,13 @@ def active_kind(df) -> str:
     if "signal_kind" in getattr(df, "columns", []) and len(df):
         return str(df["signal_kind"].iloc[0])
     return "IV+pp"
+
+
+def active_star_kind(df) -> str:
+    """The score label driving the ★ rating, defaulting to Composite v2."""
+    if "star_kind" in getattr(df, "columns", []) and len(df):
+        return str(df["star_kind"].iloc[0])
+    return "Composite v2"
 
 
 # ── Dispatch ────────────────────────────────────────────────────────────────────

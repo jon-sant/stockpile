@@ -210,10 +210,14 @@ def _scan_one(pos: dict, opt_type_key: str, scan_mode_key: str,
     position (`shares=0`, no open options), so the roll-close-cost block
     below is skipped and the position scans as "best option" only.
 
-    force_live=False (auto-populate path) lets a same-day background
-    snapshot serve the fetch instead of a live call — provider is still
-    whatever the caller passes, but a cache hit only ever happens when
-    that's "yahoo-headless" (see fetch.fetch_position_cached).
+    force_live=False lets a same-day snapshot (background-populated or
+    from an earlier scan click this session) serve the fetch instead of
+    a live call whenever it covers the requested DTE range — provider
+    is still whatever the caller passes, but a cache hit only ever
+    happens when that's "yahoo-headless" (see fetch.fetch_position_cached).
+    Both the auto-populate path and an explicit Scan click pass False
+    here so narrowing min_dte/max_dte after an earlier same-day scan
+    reuses that snapshot instead of re-fetching live.
     """
     ticker = pos["ticker"]
     df, earnings_dates, err, from_cache, fetched_at = fetch_position_cached(
@@ -572,6 +576,13 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
                  "delta is vs. this ticker's own bucketed history (0-100). "
                  "Blank = no filter.",
         )
+    with _pp3:
+        port_show_mc = st.checkbox(
+            "Show Monte Carlo columns", value=False, key=f"{k}_show_mc",
+            help="P(profit), MC Fair Value, Premium vs Model, Breakeven "
+                 "Move, CVaR, VaR, Sortino — computed by a background "
+                 "worker, so these may show \"TBD\" until it catches up.",
+        )
 
     # ── Controls row 2: scan semantics ───────────────────────────────────────
     # Watchlist mode is best-option only over a typed basket, so Scan mode
@@ -790,7 +801,7 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
             results = _scan_all_parallel(
                 positions, opt_type_key, scan_mode_key, _provider, _scfg,
                 int(port_min_dte), int(port_max_dte), progress,
-                force_live=not _was_auto_populate)
+                force_live=False)
             positions = []  # skip the sequential loop below
         for i, pos in enumerate(positions):
             pct = (i + 1) / len(positions)
@@ -802,7 +813,7 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
                     res = _scan_one(
                         pos, opt_type_key, scan_mode_key, _provider, _scfg,
                         int(port_min_dte), int(port_max_dte),
-                        force_live=not _was_auto_populate,
+                        force_live=False,
                     )
                     break
                 except RateLimitError as exc:
@@ -900,7 +911,8 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
                            provider=_lb_provider,
                            min_ivpp=port_min_ivpp, min_ann=port_min_ann,
                            min_percentile=port_min_percentile,
-                           min_ann_delta_percentile=port_min_ann_delta_percentile)
+                           min_ann_delta_percentile=port_min_ann_delta_percentile,
+                           show_mc=port_show_mc)
 
         with st.expander("Capital Allocator", expanded=False):
             st.caption(
@@ -1149,7 +1161,8 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
                                int(port_min_vol),
                                min_ivpp=port_min_ivpp, min_ann=port_min_ann,
                                min_percentile=port_min_percentile,
-                               min_ann_delta_percentile=port_min_ann_delta_percentile)
+                               min_ann_delta_percentile=port_min_ann_delta_percentile,
+                               show_mc=port_show_mc)
 
     # Portfolio HTML download
     from options_scanner.report import render_portfolio_html

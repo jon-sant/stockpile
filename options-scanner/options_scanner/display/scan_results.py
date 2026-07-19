@@ -22,6 +22,7 @@ from options_scanner import iv_scores
 from options_scanner.format import EARNINGS_WARN_LEGEND, fmt_stars, fmt_strike, stars_for
 from options_scanner.ui_theme import empty_state
 
+from options_scanner.display import mc_columns
 from options_scanner.display.chain_styling import (
     SPREAD_HELP,
     LAST_HELP,
@@ -70,14 +71,17 @@ def _iv_rank_help(sub: pd.DataFrame) -> str:
 
 def show_df(sub: pd.DataFrame, roll_close_cost: float | None = None,
             min_oi: int = 0, min_vol: int = 0,
-            buy: bool = False, opt_type: str = "option") -> None:
+            buy: bool = False, opt_type: str = "option",
+            show_mc: bool = False) -> None:
     """Render the styled table for one option-type subset (or one
     per-position view from the Portfolio tab).
 
     Empty input renders an `empty_state` callout so the user knows
     the table didn't fail to load — it just has nothing to show.
     When `roll_close_cost` is supplied (roll-an-existing-position
-    flow), an extra Net Credit column is appended.
+    flow), an extra Net Credit column is appended. `show_mc` gates the
+    7 extra Monte Carlo columns (P(profit) through Sortino) behind the
+    "Show Monte Carlo columns" checkbox — Exp P&L is always shown.
     """
     if sub.empty:
         empty_state(
@@ -89,6 +93,7 @@ def show_df(sub: pd.DataFrame, roll_close_cost: float | None = None,
 
     rank_col = {"Top": sub["_rank"]} if "_rank" in sub.columns else {}
     kind = iv_scores.active_kind(sub)
+    star_kind = iv_scores.active_star_kind(sub)
 
     # ⚠ in the Expiration cell = short-dated (≤60 DTE) and expiring after the
     # next earnings — its IV+pp carries event premium and it's the slice
@@ -122,9 +127,11 @@ def show_df(sub: pd.DataFrame, roll_close_cost: float | None = None,
     if kind != "IV+pp":
         mult, _ = iv_scores.display_for(kind)
         cols[kind] = (sub["signal_score"] * mult).round(2)
-    cols["★"] = [fmt_stars(s) for s in stars_for(sub["signal_score"])]
+    _star_scores = sub["star_score"] if "star_score" in sub.columns else sub["signal_score"]
+    cols["★"] = [fmt_stars(s) for s in stars_for(_star_scores)]
     cols.update({
         "Delta":  sub["delta"].round(2),
+        "Exp P&L": mc_columns.exp_pnl_column(sub, buy),
         "Ann%":   sub["ann_yield_pct"].round(1),
         "Ann% / Delta": (sub["ann_yield_pct"]
                          / sub["delta"].abs().replace(0, float("nan"))).round(1),
@@ -132,6 +139,8 @@ def show_df(sub: pd.DataFrame, roll_close_cost: float | None = None,
         "OI":     sub["open_interest"],
         "Vol":    sub["volume"],
     })
+    if show_mc:
+        cols.update(mc_columns.mc_extra_columns(sub, buy))
     disp = pd.DataFrame(cols)
     if roll_close_cost is not None:
         disp["NetCr"] = (sub["mid"] - roll_close_cost).round(2)
@@ -186,12 +195,15 @@ def show_df(sub: pd.DataFrame, roll_close_cost: float | None = None,
             help=_iv_rank_help(sub)),
         "★": st.column_config.TextColumn(
             "★", width=70,
-            help="Star rating: percentile rank of the active ranking "
-                 "score within this table, mapped to 0-5 stars at "
-                 "half-star resolution. Most meaningful when Composite "
-                 "v2 is the active score."),
+            help=f"Star rating: percentile rank of the {star_kind} score "
+                 "within this table, mapped to 0-5 stars at half-star "
+                 "resolution. Independent of the ranking/sort column above "
+                 "— set via the Stars (ranking key) dropdown in Advanced "
+                 "surface fit."),
         "Delta": st.column_config.NumberColumn("Delta", format="%.2f",
                                                width=60),
+        "Exp P&L": st.column_config.TextColumn(
+            "Exp P&L", width=85, help=mc_columns.exp_pnl_help()),
         "Ann%":  st.column_config.NumberColumn("Ann%", format="%.1f%%",
                                                width=65),
         "Ann% / Delta": st.column_config.NumberColumn(
@@ -210,6 +222,11 @@ def show_df(sub: pd.DataFrame, roll_close_cost: float | None = None,
                                                width=65,
                                                help=vol_help_for(min_vol)),
     })
+    if show_mc:
+        col_cfg.update({
+            label: st.column_config.TextColumn(label, width=90, help=help_text)
+            for label, help_text in mc_columns.mc_extra_help().items()
+        })
     if kind != "IV+pp":
         _, fmt = iv_scores.display_for(kind)
         col_cfg[kind] = st.column_config.NumberColumn(
@@ -235,7 +252,8 @@ def show_scan_results(df: pd.DataFrame, mode: str, buy: bool,
                       min_ivpp: float | None = None,
                       min_ann: float | None = None,
                       min_percentile: float | None = None,
-                      min_ann_delta_percentile: float | None = None) -> None:
+                      min_ann_delta_percentile: float | None = None,
+                      show_mc: bool = False) -> None:
     """Filter, rank, and render the top-N per option type.
 
     Splits the chain by `mode` ("call", "put", or "both"), sorts by
@@ -276,4 +294,4 @@ def show_scan_results(df: pd.DataFrame, mode: str, buy: bool,
         if len(to_show) > 1:
             st.subheader(type_labels[opt_type])
         show_df(sub, roll_close_cost, min_oi, min_vol,
-                buy=buy, opt_type=opt_type)
+                buy=buy, opt_type=opt_type, show_mc=show_mc)

@@ -303,6 +303,7 @@ def tab_single() -> None:
 
     if not advanced:
         surface_filter_config, algo_config, score_config = _SF_PRESETS[preset]
+        star_score_config = iv_scores.STAR_DEFAULT
     else:
         with st.expander("Advanced surface fit", expanded=True):
             st.caption(
@@ -426,6 +427,22 @@ def tab_single() -> None:
                 score_name = "raw_pp"
             score_config = (score_name, frozenset())
 
+            # ── Stars (independent ranking key) ─────────────────────────────
+            star_score_name = st.selectbox(
+                "STARS (ranking key)", score_names,
+                index=score_names.index("composite_v2"),
+                format_func=lambda n: iv_scores.REGISTRY[n]["label"],
+                key="s_sf_star_score",
+                help="Which score drives the ★ star rating in the results "
+                     "table — independent of Score above, which drives "
+                     "table ranking/sort. Defaults to Composite v2.",
+            )
+            if not iv_scores.REGISTRY[star_score_name].get("enabled", True):
+                st.info(f"{iv_scores.REGISTRY[star_score_name]['label']} "
+                        "isn't available yet — using Composite v2.")
+                star_score_name = "composite_v2"
+            star_score_config = (star_score_name, frozenset())
+
     # ── Auto-populate from a same-day background scan ──────────────────────────
     # Zero-click: if a background pass (see background_scan.py) already
     # covers this exact ticker+DTE window, show it immediately instead of
@@ -489,8 +506,9 @@ def tab_single() -> None:
                 _fetch_provider,
                 st.session_state.get("schwab_config"),
                 surface_filter_config, algo_config, score_config,
+                star_score_config,
                 moomoo_config=st.session_state.get("moomoo_config"),
-                force_live=not _was_auto_populate,
+                force_live=False,
             )
 
         if err:
@@ -757,12 +775,19 @@ def tab_single() -> None:
             st.line_chart(daily, y_label="Mean IV+pp (%)")
             _disp = hist.copy()
             _disp["strike"] = _disp["strike"].apply(fmt_strike)
+            _disp["iv"] = (_disp["iv"] * 100).round(1)
             _disp["iv_excess"] = (_disp["iv_excess"] * 100).round(1)
+            _disp["delta"] = _disp["delta"].round(2)
+            _disp["ann_yield_pct"] = _disp["ann_yield_pct"].round(1)
             st.dataframe(
-                _disp.rename(columns={
+                _disp[["scan_date", "type", "strike", "expiration", "dte",
+                      "iv", "iv_excess", "delta", "ann_yield_pct",
+                      "open_interest", "volume"]].rename(columns={
                     "scan_date": "Scan Date", "type": "Type",
                     "strike": "Strike", "expiration": "Expiration",
-                    "dte": "DTE", "iv_excess": "IV+pp",
+                    "dte": "DTE", "iv": "IV%", "iv_excess": "IV+pp",
+                    "delta": "Delta", "ann_yield_pct": "Ann%",
+                    "open_interest": "OI", "volume": "Vol",
                 }),
                 hide_index=True, width="stretch",
             )
@@ -790,13 +815,20 @@ def tab_single() -> None:
                           res.get("min_vol", 0), top_ranks=top_ranks)
 
     st.subheader("Top candidates — all chains")
+    show_mc = st.checkbox(
+        "Show Monte Carlo columns", value=False, key="s_show_mc",
+        help="P(profit), MC Fair Value, Premium vs Model, Breakeven Move, "
+             "CVaR, VaR, Sortino — computed by a background worker, so "
+             "these may show \"TBD\" until it catches up.",
+    )
     show_scan_results(df_filt, mode_r, buy_r, rcc,
                        res["min_oi"], res["top_n"],
                        res.get("min_vol", 0),
                        min_ivpp=res.get("min_ivpp"),
                        min_ann=res.get("min_ann"),
                        min_percentile=res.get("min_percentile"),
-                       min_ann_delta_percentile=res.get("min_ann_delta_percentile"))
+                       min_ann_delta_percentile=res.get("min_ann_delta_percentile"),
+                       show_mc=show_mc)
 
     # ── Monte Carlo trade analyzer ────────────────────────────────────────
     # Pick any candidate from the ranked table above and simulate its
