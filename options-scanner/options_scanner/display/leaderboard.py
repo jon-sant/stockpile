@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -666,6 +667,17 @@ def render_leaderboard(results: list[dict], mode: str, min_oi: int,
     stamp_caption()
 
 
+def _prem_pct_em(board: pd.DataFrame) -> pd.Series:
+    """Premium as a fraction of the option's own theoretical 1-sigma
+    expected move: mid / (spot * iv * sqrt(dte/365)). Informational only.
+    dte clamped to >=1 to avoid a 0-DTE divide-by-zero."""
+    if not {"mid", "spot", "iv", "dte"} <= set(board.columns):
+        return pd.Series([float("nan")] * len(board), index=board.index)
+    expected_move = (board["spot"] * board["iv"]
+                     * np.sqrt(board["dte"].clip(lower=1) / 365.0))
+    return (board["mid"] / expected_move.replace(0, float("nan"))).round(2)
+
+
 def _render_table(board: pd.DataFrame, side: str, min_vol: int,
                   investigate: bool = False, min_oi: int = 25, top_n: int = 5,
                   ticker_dfs: dict | None = None,
@@ -737,6 +749,7 @@ def _render_table(board: pd.DataFrame, side: str, min_vol: int,
         "Ann%":  board["ann_yield_pct"].round(1),
         "Ann% / Delta": (board["ann_yield_pct"]
                          / board["delta"].abs().replace(0, float("nan"))).round(1),
+        "Prem/EM": _prem_pct_em(board),
         "OI":    board["open_interest"],
         "Vol":   board["volume"],
     })
@@ -777,6 +790,11 @@ def _render_table(board: pd.DataFrame, side: str, min_vol: int,
             help="Ann% divided by |Delta| — yield per unit of directional "
                  "exposure. Higher = more yield for the assignment risk "
                  "taken on."),
+        "Prem/EM": st.column_config.NumberColumn(
+            "Prem/EM", format="%.2f", width=75,
+            help="Premium ÷ (spot × IV × √(DTE/365)) — how much of the "
+                 "option's own theoretical 1-sigma expected move you're "
+                 "being paid. >1 means premium exceeds the modeled move."),
         "OI":    st.column_config.NumberColumn("OI", format="%d", width=65),
         "Vol":   st.column_config.NumberColumn("Vol", format="%d", width=65),
     }

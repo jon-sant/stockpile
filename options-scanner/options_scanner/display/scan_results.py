@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -34,6 +35,19 @@ from options_scanner.display.chain_styling import (
     wide_spread_mask,
 )
 from options_scanner.display.scan_stamp import stamp_caption
+
+
+def _prem_pct_em(sub: pd.DataFrame) -> pd.Series:
+    """Premium as a fraction of the option's own theoretical 1-sigma
+    expected move: mid / (spot * iv * sqrt(dte/365)). >1 means the
+    premium exceeds the modeled 1-sigma move; informational only, no
+    ranking/filter tie-in. dte is clamped to >=1 to avoid a 0-DTE
+    divide-by-zero (mirrors the ann_yield_pct convention elsewhere)."""
+    if not {"mid", "spot", "iv", "dte"} <= set(sub.columns):
+        return pd.Series([float("nan")] * len(sub), index=sub.index)
+    expected_move = (sub["spot"] * sub["iv"]
+                     * np.sqrt(sub["dte"].clip(lower=1) / 365.0))
+    return (sub["mid"] / expected_move.replace(0, float("nan"))).round(2)
 
 
 def show_df(sub: pd.DataFrame, roll_close_cost: float | None = None,
@@ -93,6 +107,7 @@ def show_df(sub: pd.DataFrame, roll_close_cost: float | None = None,
         "Ann%":   sub["ann_yield_pct"].round(1),
         "Ann% / Delta": (sub["ann_yield_pct"]
                          / sub["delta"].abs().replace(0, float("nan"))).round(1),
+        "Prem/EM": _prem_pct_em(sub),
         "OI":     sub["open_interest"],
         "Vol":    sub["volume"],
     })
@@ -154,6 +169,11 @@ def show_df(sub: pd.DataFrame, roll_close_cost: float | None = None,
             help="Ann% divided by |Delta| — yield per unit of directional "
                  "exposure. Higher = more yield for the assignment risk "
                  "taken on."),
+        "Prem/EM": st.column_config.NumberColumn(
+            "Prem/EM", format="%.2f", width=75,
+            help="Premium ÷ (spot × IV × √(DTE/365)) — how much of the "
+                 "option's own theoretical 1-sigma expected move you're "
+                 "being paid. >1 means premium exceeds the modeled move."),
         "OI":    st.column_config.NumberColumn("OI", format="%d",
                                                width=65, help=OI_HELP),
         "Vol":   st.column_config.NumberColumn("Vol", format="%d",
