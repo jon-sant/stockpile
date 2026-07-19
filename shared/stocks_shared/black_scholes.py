@@ -103,6 +103,38 @@ def prob_above(S: float, K: float, T: float, r: float,
     return norm_cdf(d2)
 
 
+def strike_for_delta(S: float, T: float, r: float, sigma: float,
+                     opt_type: str, target_delta: float, *,
+                     lo_mult: float = 0.3, hi_mult: float = 3.0,
+                     tol: float = 1e-4, max_iter: int = 60) -> float:
+    """Strike whose Black-Scholes delta equals `target_delta`, by bisection.
+
+    `bs_delta` is monotonically decreasing in K for both calls (1 -> 0 as
+    K rises) and puts (0 -> -1 as K rises) at fixed S/T/r/sigma, so a
+    bracketed bisection converges reliably. `target_delta` uses the same
+    sign convention `bs_delta` returns (calls 0..1, puts -1..0). Search
+    range is `[S*lo_mult, S*hi_mult]`; a target outside what's reachable
+    in that window clamps to the nearest bound rather than erroring.
+    """
+    lo, hi = S * lo_mult, S * hi_mult
+    delta_lo = bs_delta(S, lo, T, r, sigma, opt_type)
+    delta_hi = bs_delta(S, hi, T, r, sigma, opt_type)
+    if target_delta >= delta_lo:
+        return lo
+    if target_delta <= delta_hi:
+        return hi
+    for _ in range(max_iter):
+        mid = 0.5 * (lo + hi)
+        d = bs_delta(S, mid, T, r, sigma, opt_type)
+        if abs(d - target_delta) < tol:
+            return mid
+        if d > target_delta:  # delta decreasing in K -> need a bigger strike
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
 def implied_vol(price: float, S: float, K: float, T: float, r: float,
                 opt_type: str, *, lo: float = 1e-3, hi: float = 5.0,
                 tol: float = 1e-6, iters: int = 100) -> float | None:
