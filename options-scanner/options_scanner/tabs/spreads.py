@@ -366,7 +366,7 @@ def _render_view(
                 _fetch_provider,
                 st.session_state.get("schwab_config"),
                 moomoo_config=st.session_state.get("moomoo_config"),
-                force_live=not _was_auto_populate,
+                force_live=False,
             )
 
         if err:

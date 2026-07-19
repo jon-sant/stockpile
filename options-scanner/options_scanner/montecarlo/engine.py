@@ -129,21 +129,25 @@ def _resolve_jump_sigma(position: Position, config: SimulationConfig) -> float:
     return float(max(0.03, min(0.25, avg_iv / np.sqrt(TRADING_DAYS_PER_YEAR) * 4.0)))
 
 
-def run_simulation(
+def prepare_paths(
     position: Position,
     config: SimulationConfig = SimulationConfig(),
     today: date | None = None,
-) -> SimulationResult:
-    """Run the Monte Carlo simulation for the given multi-leg position.
+) -> tuple[np.ndarray, np.ndarray, date, int, date]:
+    """Side-independent half of the simulation: validate, resolve vol/jumps,
+    and generate the underlying price paths.
 
-    Args:
-        position: The position to simulate.
-        config: Engine knobs. Defaults are sensible for retail trader UX.
-        today: Simulation start date. Defaults to `date.today()`. Useful to
-            inject in tests for deterministic horizon computation.
+    Split out of `run_simulation` so a caller that needs metrics for both a
+    long AND a short version of the same contract (e.g. a background worker
+    computing buy/sell Monte Carlo columns) can generate the expensive path
+    set once and reuse it for both `metrics_for_position` calls — vol
+    resolution, jump calibration, and path generation only depend on the
+    position's legs' IV/qty/expiration, never on `Leg.side`.
 
     Returns:
-        SimulationResult with terminal P&L, sampled paths, and summary metrics.
+        (paths, days, horizon, n_days, today) — `today` is echoed back
+        since callers need the resolved (possibly defaulted) value for
+        the subsequent `metrics_for_position` call.
 
     Raises:
         ValueError: When position has no legs, or vol cannot be resolved.
@@ -183,17 +187,27 @@ def run_simulation(
         jump_sigma=jump_sigma,
     )
     days = np.arange(n_days + 1, dtype=np.int64)
+    return paths, days, horizon, n_days, today
+
+
+def metrics_for_position(
+    position: Position,
+    paths: np.ndarray,
+    days: np.ndarray,
+    horizon: date,
+    today: date,
+    config: SimulationConfig,
+    n_days: int,
+) -> tuple[dict[str, float], np.ndarray, np.ndarray]:
+    """Side-dependent half of the simulation: payoff, summary metrics, and
+    the MC-fair-value/edge-vs-market block, for one `position` (a specific
+    `Leg.side`) against an already-generated path set.
+
+    Returns:
+        (metrics, terminal_pnl, terminal_spot)
+    """
     terminal_pnl = evaluate_payoff(position, paths, days, horizon, today)
     terminal_spot = paths[:, -1]
-
-    # Sample up to 200 paths for plotting (deterministic given config.seed).
-    n_sample = min(200, paths.shape[0])
-    rng = np.random.default_rng(config.seed if config.seed is not None else 0)
-    if paths.shape[0] > n_sample:
-        idx = rng.choice(paths.shape[0], size=n_sample, replace=False)
-    else:
-        idx = np.arange(n_sample)
-    path_sample = paths[idx]
 
     metrics = summarize(terminal_pnl, terminal_spot, position.spot)
     # ── MC fair value & premium vs model ─────────────────────────────────
@@ -217,6 +231,41 @@ def run_simulation(
     metrics["mc_fair_value"] = mc_fair_value
     metrics["edge_vs_market"] = edge_vs_market
     metrics["mc_fair_value_stderr"] = mc_fair_value_stderr
+
+    return metrics, terminal_pnl, terminal_spot
+
+
+def run_simulation(
+    position: Position,
+    config: SimulationConfig = SimulationConfig(),
+    today: date | None = None,
+) -> SimulationResult:
+    """Run the Monte Carlo simulation for the given multi-leg position.
+
+    Args:
+        position: The position to simulate.
+        config: Engine knobs. Defaults are sensible for retail trader UX.
+        today: Simulation start date. Defaults to `date.today()`. Useful to
+            inject in tests for deterministic horizon computation.
+
+    Returns:
+        SimulationResult with terminal P&L, sampled paths, and summary metrics.
+
+    Raises:
+        ValueError: When position has no legs, or vol cannot be resolved.
+    """
+    paths, days, horizon, n_days, today = prepare_paths(position, config, today)
+    metrics, terminal_pnl, terminal_spot = metrics_for_position(
+        position, paths, days, horizon, today, config, n_days)
+
+    # Sample up to 200 paths for plotting (deterministic given config.seed).
+    n_sample = min(200, paths.shape[0])
+    rng = np.random.default_rng(config.seed if config.seed is not None else 0)
+    if paths.shape[0] > n_sample:
+        idx = rng.choice(paths.shape[0], size=n_sample, replace=False)
+    else:
+        idx = np.arange(n_sample)
+    path_sample = paths[idx]
 
     return SimulationResult(
         n_paths=config.n_paths,

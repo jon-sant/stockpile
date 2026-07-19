@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import sys
 from datetime import datetime, timedelta
 
@@ -11,6 +12,15 @@ from datetime import datetime, timedelta
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 from pathlib import Path
+
+# Without this, the root logger defaults to WARNING with no handler, so
+# every log.info() in the fetch/scan path (which provider, cache hit vs.
+# live fetch) is silently dropped from the console — only warnings/errors
+# and yfinance's own print()s show up, which is why a failed startup scan
+# looked provider-less. Mirrors main.py's CLI setup.
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S"
+)
 
 import streamlit as st
 
@@ -53,6 +63,18 @@ def _background_scan_singleton():
 
 
 _background_scan_singleton()
+
+
+# ── Background Monte Carlo worker ────────────────────────────────────────────
+# Same st.cache_resource singleton idiom as above. See
+# options_scanner/mc_background.py for what the thread/process-pool does.
+@st.cache_resource(show_spinner=False)
+def _mc_background_singleton():
+    from options_scanner.mc_background import start_mc_worker_once
+    return start_mc_worker_once()
+
+
+_mc_background_singleton()
 
 
 # Inject the global stylesheet and Altair theme as early as possible so

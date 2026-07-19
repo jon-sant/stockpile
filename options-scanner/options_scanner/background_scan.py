@@ -89,7 +89,11 @@ def _run_pass(scan_day: date) -> bool:
     for ticker, min_dte, max_dte in universe:
         if chain_cache.has_fresh_snapshot(ticker, min_dte, max_dte,
                                           _PROVIDER, scan_day=scan_day):
+            log.info("[background_scan] %s: local cache hit, provider=%s",
+                     ticker, _PROVIDER)
             continue
+        log.info("[background_scan] %s: fetching online, provider=%s",
+                 ticker, _PROVIDER)
         try:
             df = fetch_chain(ticker, opt_type="both", min_dte=min_dte,
                              max_dte=max_dte, provider=_PROVIDER)

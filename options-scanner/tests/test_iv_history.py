@@ -28,6 +28,10 @@ def _snapshot(n: int, base: float = 0.0) -> pd.DataFrame:
         "mid": [1.0 + 0.01 * i for i in range(n)],
         "delta": [0.3 + 0.01 * i for i in range(n)],
         "ann_yield_pct": [10.0 + 0.1 * i for i in range(n)],
+        "iv": [0.25 + 0.001 * i for i in range(n)],
+        "open_interest": [100 + i for i in range(n)],
+        "volume": [10 + i for i in range(n)],
+        "spot": [98.0] * n,
     })
 
 
@@ -87,16 +91,98 @@ def test_percentile_for_empty_ticker_is_nan():
 
 
 def test_legacy_shaped_df_still_records_and_reads():
-    # Old-style df (no mid/delta/ann_yield_pct) must not crash record_scan,
-    # and history_for must still return the full (new) column set with
-    # NULL/NaN in the columns the legacy df never had.
+    # Old-style df (no mid/delta/ann_yield_pct/iv/open_interest/volume)
+    # must not crash record_scan, and history_for must still return the
+    # full (new) column set with NULL/NaN in the columns the legacy df
+    # never had.
     iv_history.record_scan("AMD", _snapshot_legacy(5), scan_day=date.today())
     hist = iv_history.history_for("AMD")
     assert len(hist) == 5
-    assert {"mid", "delta", "ann_yield_pct"} <= set(hist.columns)
+    assert {"mid", "delta", "ann_yield_pct", "iv",
+            "open_interest", "volume"} <= set(hist.columns)
     assert hist["mid"].isna().all()
     assert hist["delta"].isna().all()
     assert hist["ann_yield_pct"].isna().all()
+    assert hist["open_interest"].isna().all()
+    assert hist["volume"].isna().all()
+
+
+def test_oi_and_volume_round_trip():
+    iv_history.record_scan("AMD", _snapshot(3), scan_day=date.today())
+    hist = iv_history.history_for("AMD")
+    assert list(hist["open_interest"]) == [100.0, 101.0, 102.0]
+    assert list(hist["volume"]) == [10.0, 11.0, 12.0]
+    assert list(hist["iv"].round(3)) == [0.25, 0.251, 0.252]
+
+
+# ── Monte Carlo columns ──────────────────────────────────────────────────
+
+
+def test_spot_and_earnings_next_date_round_trip():
+    iv_history.record_scan("AMD", _snapshot(2), scan_day=date(2026, 7, 19),
+                           earnings_next_date=date(2026, 8, 5))
+    mc = iv_history.mc_results_for("AMD", scan_date=date(2026, 7, 19))
+    assert not mc.empty
+    pending = iv_history.pending_mc_rows(limit=10)
+    assert list(pending["spot"]) == [98.0, 98.0]
+    assert list(pending["earnings_next_date"]) == ["2026-08-05", "2026-08-05"]
+
+
+def test_fresh_scan_rows_are_pending():
+    iv_history.record_scan("AMD", _snapshot(2), scan_day=date(2026, 7, 19))
+    mc = iv_history.mc_results_for("AMD", scan_date=date(2026, 7, 19))
+    assert mc["mc_status"].isna().all()
+    for col in iv_history._MC_METRIC_COLS:
+        assert mc[col].isna().all()
+
+
+def test_legacy_rows_have_no_spot_and_are_pending():
+    # A row recorded before this session's migration (no spot/earnings/mc_*
+    # columns) must still read back as pending, not crash.
+    iv_history.record_scan("AMD", _snapshot_legacy(2), scan_day=date(2026, 7, 19))
+    pending = iv_history.pending_mc_rows(limit=10)
+    assert len(pending) == 2
+    assert pending["spot"].isna().all()
+    assert pending["earnings_next_date"].isna().all()
+
+
+def test_record_mc_results_marks_done_and_writes_metrics():
+    iv_history.record_scan("AMD", _snapshot(2), scan_day=date(2026, 7, 19))
+    pending = iv_history.pending_mc_rows(limit=10)
+    rowid = int(pending.iloc[0]["rowid"])
+    results = {col: 1.5 for col in iv_history._MC_METRIC_COLS}
+    iv_history.record_mc_results(rowid, results, duration_ms=42.0)
+
+    mc = iv_history.mc_results_for("AMD", scan_date=date(2026, 7, 19))
+    done_row = mc.iloc[0]
+    assert done_row["mc_status"] == "done"
+    for col in iv_history._MC_METRIC_COLS:
+        assert done_row[col] == 1.5
+    # The other row is untouched — still pending.
+    assert pd.isna(mc.iloc[1]["mc_status"])
+
+    still_pending = iv_history.pending_mc_rows(limit=10)
+    assert rowid not in set(still_pending["rowid"])
+    assert len(still_pending) == 1
+
+
+def test_record_mc_error_marks_error_not_pending():
+    iv_history.record_scan("AMD", _snapshot(1), scan_day=date(2026, 7, 19))
+    rowid = int(iv_history.pending_mc_rows(limit=10).iloc[0]["rowid"])
+    iv_history.record_mc_error(rowid, "boom: no positive IV")
+
+    mc = iv_history.mc_results_for("AMD", scan_date=date(2026, 7, 19))
+    assert mc.iloc[0]["mc_status"] == "error"
+    # Errored rows are no longer "pending" (mc_status IS NULL) — they don't
+    # get retried forever in a tight loop.
+    assert iv_history.pending_mc_rows(limit=10).empty
+
+
+def test_pending_mc_rows_prioritizes_ticker():
+    iv_history.record_scan("AMD", _snapshot(2), scan_day=date(2026, 7, 19))
+    iv_history.record_scan("TSLA", _snapshot(2), scan_day=date(2026, 7, 19))
+    pending = iv_history.pending_mc_rows(limit=10, priority_ticker="TSLA")
+    assert list(pending["ticker"])[:2] == ["TSLA", "TSLA"]
 
 
 def test_schema_migration_preserves_existing_rows():
