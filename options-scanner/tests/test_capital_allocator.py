@@ -113,3 +113,27 @@ def test_allocate_capital_leftover_budget_reoffered_to_next():
     result = allocate_capital(candidates, budget=10000.0, max_pct_per_position=0.5)
     assert len(result) == 2
     assert set(result["ticker"]) == {"A", "B"}
+
+
+def test_allocate_capital_corr_penalty_can_change_selection():
+    # AAA and BBB are highly correlated; CCC is not. Budget affords two
+    # picks. Without corr, AAA (best) and BBB (2nd best) win. With corr,
+    # BBB's edge gets penalized enough by AAA's pick that CCC (3rd best,
+    # uncorrelated) wins the second slot instead.
+    candidates = [
+        _cand("AAA", 100, expected_pnl=400.0, cvar_5pct=-400.0, collateral=5000.0),
+        _cand("BBB", 100, expected_pnl=390.0, cvar_5pct=-400.0, collateral=5000.0),
+        _cand("CCC", 100, expected_pnl=200.0, cvar_5pct=-400.0, collateral=5000.0),
+    ]
+    corr = pd.DataFrame(
+        {"AAA": [1.0, 1.0, 0.0], "BBB": [1.0, 1.0, 0.0], "CCC": [0.0, 0.0, 1.0]},
+        index=["AAA", "BBB", "CCC"],
+    )
+
+    no_corr = allocate_capital(candidates, budget=10000.0,
+                               max_pct_per_position=0.5)
+    assert set(no_corr["ticker"]) == {"AAA", "BBB"}
+
+    with_corr = allocate_capital(candidates, budget=10000.0,
+                                 max_pct_per_position=0.5, corr=corr)
+    assert set(with_corr["ticker"]) == {"AAA", "CCC"}
