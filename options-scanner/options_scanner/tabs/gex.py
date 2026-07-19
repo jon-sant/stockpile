@@ -32,7 +32,8 @@ from options_scanner.display.spot_meta import (
     spot_help_text,
     spot_value_html,
 )
-from options_scanner.fetch import fetch_and_enrich
+from options_scanner import chain_cache
+from options_scanner.fetch import fetch_and_enrich_cached
 from options_scanner.ui_theme import metric_card, render_schwab_reauth_hint
 
 
@@ -140,6 +141,27 @@ def tab_gex() -> None:
         "where OI is dense; long-dated (LEAPS) gamma is thin and noisier."
     )
 
+    # ── Auto-populate from a same-day background scan ──────────────────────────
+    # Zero-click, but only when EVERY parsed ticker already has a fresh
+    # yahoo-headless snapshot — a partial hit would still mean a live
+    # (slow, Selenium) fetch for the missing tickers on page load, which
+    # defeats the point. A partial hit just waits for the Scan button.
+    _raw = tickers_input.strip().upper()
+    _auto_tickers = [t.strip() for t in _raw.replace(";", ",").split(",") if t.strip()]
+    _seen = set()
+    _auto_tickers = [t for t in _auto_tickers if not (t in _seen or _seen.add(t))]
+    _auto_populate = (
+        not scanned
+        and not st.session_state.get("_gex_rescan_trigger")
+        and bool(_auto_tickers)
+        and st.session_state.get("gex_results", {}).get("tickers") != _auto_tickers
+        and all(chain_cache.has_fresh_snapshot(t, int(min_dte), int(max_dte),
+                                               "yahoo-headless")
+               for t in _auto_tickers)
+    )
+    if _auto_populate:
+        st.session_state["_gex_rescan_trigger"] = True
+
     if scanned or st.session_state.pop("_gex_rescan_trigger", False):
         raw = tickers_input.strip().upper()
         tickers = [t.strip() for t
@@ -161,6 +183,11 @@ def tab_gex() -> None:
         per_ticker: dict[str, dict] = {}
         failed: list[tuple[str, str]] = []
         fetch_errors = False  # fetch failures (vs. local no-options/no-GEX)
+        _was_auto_populate = _auto_populate
+        _fetch_provider = ("yahoo-headless" if _was_auto_populate
+                           else st.session_state.get("data_source", "yahoo"))
+        _any_from_cache = False
+        _last_fetched_at = None
         progress = st.progress(
             0.0, text=f"Fetching {len(tickers)} ticker(s)…"
         )
@@ -169,12 +196,15 @@ def tab_gex() -> None:
                 i / len(tickers),
                 text=f"Fetching {t} ({i}/{len(tickers)})…",
             )
-            df, earnings, err = fetch_and_enrich(
+            df, earnings, err, from_cache, fetched_at = fetch_and_enrich_cached(
                 t, "both", int(min_dte), int(max_dte),
-                st.session_state.get("data_source", "yahoo"),
+                _fetch_provider,
                 st.session_state.get("schwab_config"),
                 moomoo_config=st.session_state.get("moomoo_config"),
+                force_live=not _was_auto_populate,
             )
+            _any_from_cache = _any_from_cache or from_cache
+            _last_fetched_at = fetched_at or _last_fetched_at
             if err:
                 failed.append((t, err))
                 fetch_errors = True
@@ -206,10 +236,11 @@ def tab_gex() -> None:
             st.session_state.pop("gex_results", None)
             return
 
-        st.session_state["scan_ts"] = datetime.now().astimezone()
-        st.session_state["scan_provider"] = st.session_state.get(
-            "data_source", "yahoo"
+        st.session_state["scan_ts"] = (
+            _last_fetched_at if _any_from_cache else datetime.now().astimezone()
         )
+        st.session_state["scan_provider"] = _fetch_provider
+        st.session_state["scan_from_cache"] = _any_from_cache
         st.session_state["gex_results"] = {
             "tickers": list(per_ticker.keys()),
             "per_ticker": per_ticker,

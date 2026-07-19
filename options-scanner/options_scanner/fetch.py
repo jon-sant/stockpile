@@ -28,6 +28,8 @@ established convention in this codebase.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -183,3 +185,123 @@ def fetch_position(ticker: str, min_dte: int, provider: str = "yahoo",
         side = "call" if opt_type == "calls" else "put"
         df = df[df["type"] == side].reset_index(drop=True)
     return df, earnings, None
+
+
+def _fetch_chain_with_cache(ticker: str, opt_type: str, min_dte: int,
+                            max_dte: int | None, provider: str,
+                            schwab_config: dict | None,
+                            moomoo_config: dict | None,
+                            fit_both_sides: bool,
+                            force_live: bool) -> tuple[pd.DataFrame, datetime, bool]:
+    """Raw-chain fetch shared by *_cached wrappers below. Checks the
+    persistent chain_cache first — only when provider is "yahoo-headless"
+    (the only provider the background scan job ever populates; serving a
+    cached Yahoo-headless chain for a user who picked Schwab would show
+    different bid/ask/OI than what they actually asked for) and the
+    caller hasn't forced a live fetch. On a miss (or any other provider),
+    fetches live and — if that fetch was yahoo-headless — saves it to the
+    cache for next time. Returns (df, fetched_at, from_cache). Exceptions
+    from the live fetch propagate to the caller unchanged.
+    """
+    from options_scanner import chain_cache
+    from options_scanner.chain import fetch_chain
+
+    fetch_type = ("both" if (fit_both_sides and opt_type in ("calls", "puts"))
+                  else opt_type)
+
+    if not force_live and provider == "yahoo-headless":
+        cached = chain_cache.load_snapshot(ticker, min_dte, max_dte, provider)
+        if cached is not None:
+            df, fetched_at = cached
+            return df, fetched_at, True
+
+    df = fetch_chain(ticker, opt_type=fetch_type, min_dte=min_dte,
+                     max_dte=max_dte, provider=provider,
+                     schwab_config=schwab_config, moomoo_config=moomoo_config)
+    fetched_at = datetime.now().astimezone()
+    if not df.empty and provider == "yahoo-headless":
+        chain_cache.save_snapshot(ticker, df, min_dte, max_dte, provider)
+    return df, fetched_at, False
+
+
+def fetch_and_enrich_cached(ticker: str, opt_type: str, min_dte: int,
+                            max_dte: int | None, provider: str = "yahoo",
+                            schwab_config: dict | None = None,
+                            surface_filters: SurfaceFilterConfig = DEFAULT_CONFIG,
+                            algo_config: AlgorithmConfig = ALGO_DEFAULT,
+                            score_config: ScoreConfig = SCORE_DEFAULT,
+                            moomoo_config: dict | None = None,
+                            fit_both_sides: bool = True,
+                            force_live: bool = False):
+    """Like fetch_and_enrich, but transparently serves a same-day
+    background-scanned chain (see chain_cache.py / background_scan.py)
+    instead of hitting the network when one covers the request — the
+    caller can't tell the difference except via the extra return values.
+    Deliberately NOT @st.cache_data: the persistent chain_cache below is
+    the real cache here, and force_live needs a clean way to bypass it
+    on every call, not just per Streamlit-session TTL.
+
+    Returns (df, earnings_dates, err, from_cache, fetched_at).
+    """
+    try:
+        df, fetched_at, from_cache = _fetch_chain_with_cache(
+            ticker, opt_type, min_dte, max_dte, provider, schwab_config,
+            moomoo_config, fit_both_sides, force_live)
+    except RateLimitError as exc:
+        return pd.DataFrame(), [], f"{exc}. Wait a minute or two and rescan.", False, None
+    except (ValueError, OSError, ConnectionRefusedError, RuntimeError) as exc:
+        if is_rate_limit_error(exc):
+            return (pd.DataFrame(), [],
+                    f"{exc}. Wait a minute or two and rescan.", False, None)
+        return pd.DataFrame(), [], str(exc), False, None
+    except Exception as exc:  # noqa: BLE001 — surface Moomoo/Schwab SDK errors
+        if is_rate_limit_error(exc):
+            return (pd.DataFrame(), [],
+                    f"{exc}. Wait a minute or two and rescan.", False, None)
+        return pd.DataFrame(), [], f"{type(exc).__name__}: {exc}", False, None
+    if df.empty:
+        return df, [], None, from_cache, fetched_at
+    df, earnings = _enrich(df, ticker, surface_filters, algo_config,
+                           score_config)
+    return df, earnings, None, from_cache, fetched_at
+
+
+def fetch_position_cached(ticker: str, min_dte: int, provider: str = "yahoo",
+                          schwab_config: dict | None = None,
+                          surface_filters: SurfaceFilterConfig = DEFAULT_CONFIG,
+                          algo_config: AlgorithmConfig = ALGO_DEFAULT,
+                          score_config: ScoreConfig = SCORE_DEFAULT,
+                          moomoo_config: dict | None = None,
+                          fit_both_sides: bool = True,
+                          opt_type: str = "calls",
+                          max_dte: int | None = 90,
+                          force_live: bool = False):
+    """Like fetch_position, but backed by the same persistent chain_cache
+    as fetch_and_enrich_cached (see there for the caching rules).
+    RateLimitError propagates uncached, same as fetch_position, so
+    callers can wait and retry.
+
+    Returns (df, earnings_dates, err, from_cache, fetched_at).
+    """
+    try:
+        df, fetched_at, from_cache = _fetch_chain_with_cache(
+            ticker, opt_type, min_dte, max_dte, provider, schwab_config,
+            moomoo_config, fit_both_sides, force_live)
+    except RateLimitError:
+        raise  # propagate uncached so callers can wait and retry
+    except (ValueError, OSError, ConnectionRefusedError, RuntimeError) as exc:
+        if is_rate_limit_error(exc):
+            raise RateLimitError(str(exc)) from exc
+        return pd.DataFrame(), [], str(exc), False, None
+    except Exception as exc:  # noqa: BLE001 — surface Moomoo/Schwab SDK errors
+        if is_rate_limit_error(exc):
+            raise RateLimitError(str(exc)) from exc
+        return pd.DataFrame(), [], f"{type(exc).__name__}: {exc}", False, None
+    if df.empty:
+        return df, [], None, from_cache, fetched_at
+    df, earnings = _enrich(df, ticker, surface_filters, algo_config,
+                           score_config)
+    if not df.empty and opt_type in ("calls", "puts"):
+        side = "call" if opt_type == "calls" else "put"
+        df = df[df["type"] == side].reset_index(drop=True)
+    return df, earnings, None, from_cache, fetched_at

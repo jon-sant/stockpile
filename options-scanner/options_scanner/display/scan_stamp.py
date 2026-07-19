@@ -54,6 +54,11 @@ def scan_stamp_text() -> str:
     Reads `scan_provider` and `scan_surface_label` (both snapshotted at
     scan time) so the stamp reflects what was actually used to fetch and
     fit the displayed data, even after the user changes the dropdowns.
+
+    When `scan_from_cache` is set (the data came from a same-day
+    background scan — see background_scan.py / chain_cache.py — rather
+    than a fetch made just now), a `(background)` qualifier is appended
+    so the stamp doesn't imply a live scan just happened.
     """
     ts = st.session_state.get("scan_ts")
     if not ts:
@@ -61,6 +66,8 @@ def scan_stamp_text() -> str:
     provider = st.session_state.get("scan_provider", "yahoo")
     label = PROVIDER_LABELS.get(provider, provider)
     stamp = f"{label} · {ts.strftime('%Y-%m-%d %H:%M')} {tz_abbr(ts)}".rstrip()
+    if st.session_state.get("scan_from_cache"):
+        stamp += " (background)"
     surface = st.session_state.get("scan_surface_label", "")
     if surface:
         stamp += f" · {surface}"

@@ -34,7 +34,8 @@ from options_scanner.display.spot_meta import (
     spot_help_text,
     spot_value_html,
 )
-from options_scanner.fetch import fetch_and_enrich
+from options_scanner import chain_cache
+from options_scanner.fetch import fetch_and_enrich_cached
 from options_scanner.format import fmt_strike
 from options_scanner import iv_algorithms, iv_history, iv_scores
 from options_scanner.iv_filters import DEFAULT_CONFIG as FILTER_DEFAULT, SurfaceFilterConfig
@@ -425,10 +426,30 @@ def tab_single() -> None:
                 score_name = "raw_pp"
             score_config = (score_name, frozenset())
 
+    # ── Auto-populate from a same-day background scan ──────────────────────────
+    # Zero-click: if a background pass (see background_scan.py) already
+    # covers this exact ticker+DTE window, show it immediately instead of
+    # making the user click Scan and wait. Purely additive — only fires
+    # when nothing's showing yet for this ticker, never overrides an
+    # already-loaded or explicitly-triggered scan.
+    _auto_ticker = ticker.strip().upper()
+    _auto_max_dte = int(max_dte_inp) if max_dte_inp > 0 else None
+    _auto_populate = (
+        not scanned
+        and not st.session_state.get("_rescan_trigger")
+        and bool(_auto_ticker)
+        and st.session_state.get("single_results", {}).get("ticker") != _auto_ticker
+        and chain_cache.has_fresh_snapshot(
+            _auto_ticker, int(min_dte), _auto_max_dte, "yahoo-headless")
+    )
+    if _auto_populate:
+        st.session_state["_rescan_trigger"] = True
+
     # ── Run scan on button click, store in session state ──────────────────────
     # Also triggers when the sticky "Rescan" pill below the results was
     # clicked on the previous run — it sets `_rescan_trigger` and calls
-    # st.rerun() so this top-of-script handler picks it up.
+    # st.rerun() so this top-of-script handler picks it up. Also triggers
+    # for _auto_populate, set just above.
     if scanned or st.session_state.pop("_rescan_trigger", False):
         ticker_clean = ticker.strip().upper()
         if not ticker_clean:
@@ -456,13 +477,20 @@ def tab_single() -> None:
         max_dte_arg = int(max_dte_inp) if max_dte_inp > 0 else None
         delta_min, delta_max = delta_range
 
-        with st.spinner(f"Fetching {ticker_clean} option chain…"):
-            df, earnings_dates, err = fetch_and_enrich(
+        _was_auto_populate = _auto_populate
+        _fetch_provider = ("yahoo-headless" if _was_auto_populate
+                           else st.session_state.get("data_source", "yahoo"))
+        _spinner_msg = (f"Loading this morning's {ticker_clean} scan…"
+                        if _was_auto_populate
+                        else f"Fetching {ticker_clean} option chain…")
+        with st.spinner(_spinner_msg):
+            df, earnings_dates, err, from_cache, fetched_at = fetch_and_enrich_cached(
                 ticker_clean, eff_opt_fetch, int(min_dte), max_dte_arg,
-                st.session_state.get("data_source", "yahoo"),
+                _fetch_provider,
                 st.session_state.get("schwab_config"),
                 surface_filter_config, algo_config, score_config,
                 moomoo_config=st.session_state.get("moomoo_config"),
+                force_live=not _was_auto_populate,
             )
 
         if err:
@@ -520,10 +548,9 @@ def tab_single() -> None:
             else:
                 st.warning(f"Could not fetch chain for {exp_yf} — NetCr column omitted.")
 
-        st.session_state["scan_ts"] = datetime.now().astimezone()
-        st.session_state["scan_provider"] = st.session_state.get(
-            "data_source", "yahoo"
-        )
+        st.session_state["scan_ts"] = fetched_at if from_cache else datetime.now().astimezone()
+        st.session_state["scan_provider"] = _fetch_provider
+        st.session_state["scan_from_cache"] = from_cache
         _adv = st.session_state.get("s_sf_advanced", False)
         if not _adv:
             st.session_state["scan_surface_label"] = st.session_state.get(

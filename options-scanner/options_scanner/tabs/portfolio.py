@@ -41,7 +41,8 @@ from options_scanner.display.spot_meta import (
     spot_value_html,
 )
 from options_scanner.defaults import default_delta_range
-from options_scanner.fetch import fetch_position
+from options_scanner import chain_cache
+from options_scanner.fetch import fetch_position_cached
 from options_scanner.portfolio import detect_brokerage
 from options_scanner.ui_theme import (
     badge, metric_card, render_schwab_reauth_hint, section_header,
@@ -201,19 +202,26 @@ def _parse_watchlist(text: str) -> list[str]:
 
 def _scan_one(pos: dict, opt_type_key: str, scan_mode_key: str,
               provider: str, scfg: dict | None,
-              min_dte: int, max_dte: int) -> dict:
+              min_dte: int, max_dte: int,
+              force_live: bool = True) -> dict:
     """Fetch + enrich one position and build its result dict.
 
     Shared by both input sources. Watchlist tickers pass a synthetic
     position (`shares=0`, no open options), so the roll-close-cost block
     below is skipped and the position scans as "best option" only.
+
+    force_live=False (auto-populate path) lets a same-day background
+    snapshot serve the fetch instead of a live call — provider is still
+    whatever the caller passes, but a cache hit only ever happens when
+    that's "yahoo-headless" (see fetch.fetch_position_cached).
     """
     ticker = pos["ticker"]
-    df, earnings_dates, err = fetch_position(
+    df, earnings_dates, err, from_cache, fetched_at = fetch_position_cached(
         ticker, int(min_dte), provider, scfg,
         moomoo_config=st.session_state.get("moomoo_config"),
         opt_type=opt_type_key,
         max_dte=int(max_dte),
+        force_live=force_live,
     )
 
     # Roll close cost lookup — only in Roll mode, only for open options
@@ -265,13 +273,15 @@ def _scan_one(pos: dict, opt_type_key: str, scan_mode_key: str,
         "spot": float(df["spot"].iloc[0]) if not df.empty else None,
         "earnings_dates": earnings_dates,
         "roll_close_costs": roll_close_costs,
+        "from_cache": from_cache,
+        "fetched_at": fetched_at,
     }
 
 
 def _scan_all_parallel(positions: list, opt_type_key: str,
                        scan_mode_key: str, provider: str,
                        scfg: dict | None, min_dte: int, max_dte: int,
-                       progress) -> list:
+                       progress, force_live: bool = True) -> list:
     """Scan every position concurrently (yahoo-headless only).
 
     The headless provider keeps a bounded pool of long-lived browsers,
@@ -296,11 +306,12 @@ def _scan_all_parallel(positions: list, opt_type_key: str,
     def _job(pos):
         try:
             return _scan_one(pos, opt_type_key, scan_mode_key, provider,
-                             scfg, min_dte, max_dte)
+                             scfg, min_dte, max_dte, force_live=force_live)
         except Exception as exc:  # noqa: BLE001 — degrade to an error card
             return {"position": pos, "error": f"{type(exc).__name__}: {exc}",
                     "df": pd.DataFrame(), "spot": None,
-                    "earnings_dates": [], "roll_close_costs": {}}
+                    "earnings_dates": [], "roll_close_costs": {},
+                    "from_cache": False, "fetched_at": None}
 
     with concurrent.futures.ThreadPoolExecutor(
             max_workers=min(4, len(positions)), initializer=_init) as ex:
@@ -665,6 +676,53 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
                       else (uploaded is None or brokerage is None
                             or not scan_ready))
     _scan_label = "Scan Watchlist" if is_watchlist else "Scan Portfolio"
+
+    # ── Auto-populate from a same-day background scan ──────────────────────────
+    # Zero-click, but only when EVERY position's ticker already has a
+    # fresh yahoo-headless snapshot — a partial hit would still mean a
+    # live (slow) fetch for the rest on page load. Watchlist tickers are
+    # known immediately; CSV positions need a validated upload first
+    # (mirrors the click handler's own parsing below).
+    _auto_positions: list | None = None
+    if is_watchlist:
+        if watchlist_tickers:
+            _auto_positions = [
+                {"ticker": t, "shares": 0, "open_calls": [], "open_puts": []}
+                for t in watchlist_tickers
+            ]
+    elif uploaded is not None and brokerage is not None and scan_ready:
+        from options_scanner.portfolio import get_portfolio
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as _f:
+                _f.write(uploaded.getvalue())
+                _auto_tmp_path = _f.name
+            try:
+                _auto_positions = get_portfolio(_auto_tmp_path, brokerage,
+                                                include_closed=True)
+                _auto_positions = [
+                    p for p in _auto_positions
+                    if (scope_open   and (p["open_calls"] or p["open_puts"]))
+                    or (scope_stock  and p["shares"] > 0
+                        and not p["open_calls"] and not p["open_puts"])
+                    or (scope_closed and p["shares"] <= 0
+                        and not p["open_calls"] and not p["open_puts"])
+                ]
+            finally:
+                os.unlink(_auto_tmp_path)
+        except Exception:
+            _auto_positions = None  # let an explicit Scan click surface the real error
+
+    _auto_populate = False
+    if _auto_positions:
+        _auto_tickers = tuple(p["ticker"] for p in _auto_positions)
+        _prev = st.session_state.get(_results_key)
+        _prev_tickers = (tuple(r["position"]["ticker"] for r in _prev["results"])
+                         if _prev else None)
+        if (_auto_tickers != _prev_tickers
+                and all(chain_cache.has_fresh_snapshot(
+                            t, int(port_min_dte), int(port_max_dte), "yahoo-headless")
+                       for t in _auto_tickers)):
+            _auto_populate = True
     _btn_col, _note_col = st.columns([1, 4], vertical_alignment="center")
     with _note_col:
         if st.session_state.get("data_source", "yahoo") == "yahoo":
@@ -675,8 +733,10 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
     with _btn_col:
         _scan_clicked = st.button(_scan_label, type="primary",
                                   disabled=_scan_disabled)
-    if _scan_clicked:
-        _provider = st.session_state.get("data_source", "yahoo")
+    if _scan_clicked or _auto_populate:
+        _was_auto_populate = _auto_populate and not _scan_clicked
+        _provider = ("yahoo-headless" if _was_auto_populate
+                    else st.session_state.get("data_source", "yahoo"))
         _scfg = st.session_state.get("schwab_config")
 
         if is_watchlist:
@@ -729,7 +789,8 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
             # symbol at once instead of the serial wait-and-retry loop.
             results = _scan_all_parallel(
                 positions, opt_type_key, scan_mode_key, _provider, _scfg,
-                int(port_min_dte), int(port_max_dte), progress)
+                int(port_min_dte), int(port_max_dte), progress,
+                force_live=not _was_auto_populate)
             positions = []  # skip the sequential loop below
         for i, pos in enumerate(positions):
             pct = (i + 1) / len(positions)
@@ -741,6 +802,7 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
                     res = _scan_one(
                         pos, opt_type_key, scan_mode_key, _provider, _scfg,
                         int(port_min_dte), int(port_max_dte),
+                        force_live=not _was_auto_populate,
                     )
                     break
                 except RateLimitError as exc:
@@ -751,7 +813,8 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
                                          "— rescan in a few minutes, or "
                                          "switch the data source to Schwab."),
                                "df": pd.DataFrame(), "spot": None,
-                               "earnings_dates": [], "roll_close_costs": {}}
+                               "earnings_dates": [], "roll_close_costs": {},
+                               "from_cache": False, "fetched_at": None}
                         break
                     waited = True
                     for left in range(_RL_WAIT_SECONDS, 0, -1):
@@ -764,10 +827,14 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
             results.append(res)
 
         progress.empty()
-        st.session_state["scan_ts"] = datetime.now().astimezone()
-        st.session_state["scan_provider"] = st.session_state.get(
-            "data_source", "yahoo"
+        _any_from_cache = any(r.get("from_cache") for r in results)
+        _cached_ats = [r["fetched_at"] for r in results if r.get("fetched_at")]
+        st.session_state["scan_ts"] = (
+            max(_cached_ats) if _any_from_cache and _cached_ats
+            else datetime.now().astimezone()
         )
+        st.session_state["scan_provider"] = _provider
+        st.session_state["scan_from_cache"] = _any_from_cache
         st.session_state[_results_key] = {
             "results": results,
             "uploaded_name": source_name,

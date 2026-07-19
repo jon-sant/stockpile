@@ -27,7 +27,8 @@ from options_scanner.display.spot_meta import (
     spot_help_text,
     spot_value_html,
 )
-from options_scanner.fetch import fetch_and_enrich
+from options_scanner import chain_cache
+from options_scanner.fetch import fetch_and_enrich_cached
 from options_scanner.format import fmt_strike
 from options_scanner.mc_ui import LegSpec, position_from_legs, render_mc_panel
 from options_scanner.ui_theme import (
@@ -318,6 +319,23 @@ def _render_view(
     # previous run (it sets `_{key_prefix}_rescan_trigger` and calls
     # st.rerun()).
     rescan_flag = f"_{key_prefix}_rescan_trigger"
+
+    # ── Auto-populate from a same-day background scan ──────────────────────────
+    # Zero-click: if a background pass already covers this ticker+DTE
+    # window, run the (cheap, local) spread-building step against it
+    # immediately instead of waiting on a live fetch.
+    _auto_ticker = ticker.strip().upper()
+    _auto_populate = (
+        not scanned
+        and not st.session_state.get(rescan_flag)
+        and bool(_auto_ticker)
+        and st.session_state.get(session_key, {}).get("ticker") != _auto_ticker
+        and chain_cache.has_fresh_snapshot(
+            _auto_ticker, int(min_dte), int(max_dte), "yahoo-headless")
+    )
+    if _auto_populate:
+        st.session_state[rescan_flag] = True
+
     if scanned or st.session_state.pop(rescan_flag, False):
         ticker_clean = ticker.strip().upper()
         if not ticker_clean:
@@ -336,12 +354,19 @@ def _render_view(
             st.session_state.pop(session_key, None)
             return
 
-        with st.spinner(f"Fetching {ticker_clean} option chain…"):
-            df, earnings_dates, err = fetch_and_enrich(
+        _was_auto_populate = _auto_populate
+        _fetch_provider = ("yahoo-headless" if _was_auto_populate
+                           else st.session_state.get("data_source", "yahoo"))
+        _spinner_msg = (f"Loading this morning's {ticker_clean} scan…"
+                        if _was_auto_populate
+                        else f"Fetching {ticker_clean} option chain…")
+        with st.spinner(_spinner_msg):
+            df, earnings_dates, err, from_cache, fetched_at = fetch_and_enrich_cached(
                 ticker_clean, "both", int(min_dte), int(max_dte),
-                st.session_state.get("data_source", "yahoo"),
+                _fetch_provider,
                 st.session_state.get("schwab_config"),
                 moomoo_config=st.session_state.get("moomoo_config"),
+                force_live=not _was_auto_populate,
             )
 
         if err:
@@ -376,10 +401,9 @@ def _render_view(
                 width_mode=width_mode,
             )
 
-        st.session_state["scan_ts"] = datetime.now().astimezone()
-        st.session_state["scan_provider"] = st.session_state.get(
-            "data_source", "yahoo"
-        )
+        st.session_state["scan_ts"] = fetched_at if from_cache else datetime.now().astimezone()
+        st.session_state["scan_provider"] = _fetch_provider
+        st.session_state["scan_from_cache"] = from_cache
         st.session_state[session_key] = {
             "ticker": ticker_clean,
             "spot": float(df["spot"].iloc[0]),
