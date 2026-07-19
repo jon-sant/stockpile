@@ -32,6 +32,7 @@ import pandas as pd
 _DEFAULT_DB = Path(__file__).resolve().parent.parent / "cache" / "iv_history.db"
 _MIN_HISTORY = 30          # pooled observations required before percentiles mean anything
 _REQUIRED_COLS = ("type", "strike", "expiration", "dte", "iv_excess")
+_NEW_COLS = ("mid", "delta", "ann_yield_pct")  # added post-launch; nullable for old rows
 
 
 def _db_path() -> Path:
@@ -59,6 +60,10 @@ def _connect() -> sqlite3.Connection:
         "CREATE INDEX IF NOT EXISTS idx_ticker_date "
         "ON iv_history (ticker, scan_date)"
     )
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(iv_history)")}
+    for col in _NEW_COLS:
+        if col not in existing_cols:
+            conn.execute(f"ALTER TABLE iv_history ADD COLUMN {col} REAL")
     return conn
 
 
@@ -75,9 +80,17 @@ def record_scan(ticker: str, df: pd.DataFrame,
         return
     scan_date = (scan_day or date.today()).isoformat()
     ticker = ticker.upper()
+
+    def _opt(col: str, r) -> float | None:
+        if col not in df.columns:
+            return None
+        v = r[col]
+        return float(v) if pd.notna(v) else None
+
     rows = [
         (ticker, scan_date, str(r["type"]), float(r["strike"]),
-         str(r["expiration"]), int(r["dte"]), float(r["iv_excess"]))
+         str(r["expiration"]), int(r["dte"]), float(r["iv_excess"]),
+         _opt("mid", r), _opt("delta", r), _opt("ann_yield_pct", r))
         for _, r in df.iterrows()
         if pd.notna(r["iv_excess"])
     ]
@@ -91,8 +104,9 @@ def record_scan(ticker: str, df: pd.DataFrame,
             )
             conn.executemany(
                 "INSERT INTO iv_history "
-                "(ticker, scan_date, type, strike, expiration, dte, iv_excess) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "(ticker, scan_date, type, strike, expiration, dte, iv_excess, "
+                " mid, delta, ann_yield_pct) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
     except sqlite3.Error:
@@ -124,11 +138,13 @@ def history_for(ticker: str, window_days: int = 30) -> pd.DataFrame:
     or the DB is unreachable, mirroring `_pool()`'s fail-open behavior.
     """
     cutoff = (date.today() - timedelta(days=window_days)).isoformat()
-    cols = ["scan_date", "type", "strike", "expiration", "dte", "iv_excess"]
+    cols = ["scan_date", "type", "strike", "expiration", "dte", "iv_excess",
+            "mid", "delta", "ann_yield_pct"]
     try:
         with _connect() as conn:
             df = pd.read_sql_query(
-                "SELECT scan_date, type, strike, expiration, dte, iv_excess "
+                "SELECT scan_date, type, strike, expiration, dte, iv_excess, "
+                "       mid, delta, ann_yield_pct "
                 "FROM iv_history WHERE ticker = ? AND scan_date >= ? "
                 "ORDER BY scan_date, type, strike",
                 conn, params=(ticker.upper(), cutoff),

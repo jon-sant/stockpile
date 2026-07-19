@@ -25,6 +25,20 @@ def _snapshot(n: int, base: float = 0.0) -> pd.DataFrame:
         "expiration": ["2026-06-19"] * n,
         "dte": [30] * n,
         "iv_excess": [base + 0.001 * i for i in range(n)],
+        "mid": [1.0 + 0.01 * i for i in range(n)],
+        "delta": [0.3 + 0.01 * i for i in range(n)],
+        "ann_yield_pct": [10.0 + 0.1 * i for i in range(n)],
+    })
+
+
+def _snapshot_legacy(n: int, base: float = 0.0) -> pd.DataFrame:
+    """Pre-PR1 shape — no mid/delta/ann_yield_pct columns at all."""
+    return pd.DataFrame({
+        "type": ["call"] * n,
+        "strike": [100.0 + i for i in range(n)],
+        "expiration": ["2026-06-19"] * n,
+        "dte": [30] * n,
+        "iv_excess": [base + 0.001 * i for i in range(n)],
     })
 
 
@@ -70,3 +84,66 @@ def test_record_noop_when_columns_missing():
 def test_percentile_for_empty_ticker_is_nan():
     pct = iv_history.percentile_for("NOPE", pd.Series([0.1, 0.2, 0.3]))
     assert np.isnan(pct).all()
+
+
+def test_legacy_shaped_df_still_records_and_reads():
+    # Old-style df (no mid/delta/ann_yield_pct) must not crash record_scan,
+    # and history_for must still return the full (new) column set with
+    # NULL/NaN in the columns the legacy df never had.
+    iv_history.record_scan("AMD", _snapshot_legacy(5), scan_day=date.today())
+    hist = iv_history.history_for("AMD")
+    assert len(hist) == 5
+    assert {"mid", "delta", "ann_yield_pct"} <= set(hist.columns)
+    assert hist["mid"].isna().all()
+    assert hist["delta"].isna().all()
+    assert hist["ann_yield_pct"].isna().all()
+
+
+def test_schema_migration_preserves_existing_rows():
+    # Simulate a pre-PR1 database: build the table with only the original
+    # 7 columns, seed rows directly, then confirm _connect()'s ALTER TABLE
+    # path adds the 3 new columns without touching existing data.
+    import sqlite3
+
+    db_path = iv_history._db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("""
+        CREATE TABLE iv_history (
+            ticker     TEXT NOT NULL,
+            scan_date  TEXT NOT NULL,
+            type       TEXT,
+            strike     REAL,
+            expiration TEXT,
+            dte        INTEGER,
+            iv_excess  REAL
+        )
+    """)
+    conn.execute(
+        "INSERT INTO iv_history VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("AMD", date.today().isoformat(), "call", 100.0, "2026-06-19", 30, 0.05),
+    )
+    conn.commit()
+    conn.close()
+
+    # Any call through _connect() (e.g. via history_for) triggers migration.
+    hist = iv_history.history_for("AMD")
+    assert len(hist) == 1
+    assert hist.iloc[0]["iv_excess"] == pytest.approx(0.05)
+    assert hist.iloc[0]["strike"] == pytest.approx(100.0)
+    assert pd.isna(hist.iloc[0]["mid"])
+    assert pd.isna(hist.iloc[0]["delta"])
+    assert pd.isna(hist.iloc[0]["ann_yield_pct"])
+
+
+def test_record_and_read_round_trip_includes_new_columns():
+    iv_history.record_scan("AMD", _snapshot(3), scan_day=date.today())
+    hist = iv_history.history_for("AMD")
+    assert len(hist) == 3
+    assert hist["mid"].notna().all()
+    assert hist["delta"].notna().all()
+    assert hist["ann_yield_pct"].notna().all()
+    row0 = hist.iloc[0]
+    assert row0["mid"] == pytest.approx(1.0)
+    assert row0["delta"] == pytest.approx(0.3)
+    assert row0["ann_yield_pct"] == pytest.approx(10.0)
