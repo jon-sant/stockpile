@@ -16,6 +16,7 @@ import pandas as pd
 import streamlit as st
 
 from options_scanner.backtest import BacktestConfig, run_backtest
+from options_scanner.display.decay_curves import render_decay_curves
 from options_scanner.format import fmt_strike
 from options_scanner.ui_theme import metric_card
 
@@ -130,3 +131,6 @@ def tab_backtest() -> None:
             "Ann%": st.column_config.NumberColumn("Ann%", format="%+.1f%%"),
         },
     )
+
+    st.markdown("**Premium decay by entry IV regime**")
+    render_decay_curves(result)
