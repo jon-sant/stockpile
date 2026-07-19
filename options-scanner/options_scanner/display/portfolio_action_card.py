@@ -32,6 +32,8 @@ def render_portfolio_action_card(
     min_vol: int,
     opt_type: str = "calls",
     buy: bool = False,
+    min_ivpp: float | None = None,
+    min_ann: float | None = None,
 ) -> None:
     """Translate the top candidate into an explicit buy/sell action.
 
@@ -52,6 +54,10 @@ def render_portfolio_action_card(
         & (df_filt["open_interest"] >= min_oi)
         & (df_filt["volume"] >= min_vol)
     ]
+    if min_ivpp is not None:
+        eligible = eligible[(eligible["iv_excess"] * 100) >= min_ivpp]
+    if min_ann is not None:
+        eligible = eligible[eligible["ann_yield_pct"] >= min_ann]
     if eligible.empty:
         return
     sort_col = "signal_score" if "signal_score" in eligible.columns else "iv_excess"

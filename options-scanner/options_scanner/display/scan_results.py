@@ -181,7 +181,9 @@ def show_df(sub: pd.DataFrame, roll_close_cost: float | None = None,
 def show_scan_results(df: pd.DataFrame, mode: str, buy: bool,
                       roll_close_cost: float | None,
                       min_oi: int, top_n: int,
-                      min_vol: int = 0) -> None:
+                      min_vol: int = 0,
+                      min_ivpp: float | None = None,
+                      min_ann: float | None = None) -> None:
     """Filter, rank, and render the top-N per option type.
 
     Splits the chain by `mode` ("call", "put", or "both"), sorts by
@@ -189,6 +191,9 @@ def show_scan_results(df: pd.DataFrame, mode: str, buy: bool,
     defaults to iv_excess), applies the OI/Vol floors, takes the top
     N, and delegates to `show_df`. Adds a subheader when rendering
     both sides so the user knows which table is which.
+
+    `min_ivpp`/`min_ann` are optional floors on IV+pp (pp) and Ann%
+    (%) — `None` (the UI default, left blank) means no filtering.
     """
     iv_asc = buy
     sort_col = "signal_score" if "signal_score" in df.columns else "iv_excess"
@@ -201,7 +206,12 @@ def show_scan_results(df: pd.DataFrame, mode: str, buy: bool,
             .sort_values([sort_col, "open_interest"], ascending=[iv_asc, False])
         )
         sub = sub[(sub["open_interest"] >= min_oi)
-                  & (sub["volume"] >= min_vol)].head(top_n)
+                  & (sub["volume"] >= min_vol)]
+        if min_ivpp is not None:
+            sub = sub[(sub["iv_excess"] * 100) >= min_ivpp]
+        if min_ann is not None:
+            sub = sub[sub["ann_yield_pct"] >= min_ann]
+        sub = sub.head(top_n)
         sub = sub.copy()
         sub["_rank"] = range(1, len(sub) + 1)
         if len(to_show) > 1:

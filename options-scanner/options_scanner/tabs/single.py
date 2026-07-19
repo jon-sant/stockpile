@@ -113,6 +113,10 @@ def tab_single() -> None:
         st.session_state["s_max_dte"] = int(entry.get("max_dte", 90))
         st.session_state["s_min_oi"]  = int(entry.get("min_oi", 1))
         st.session_state["s_min_vol"] = int(entry.get("min_vol", 1))
+        # Not persisted with recent scans — runtime-only, so reset to blank
+        # rather than carry over a stale filter from a previous scan.
+        st.session_state["s_min_ivpp"] = None
+        st.session_state["s_min_ann"]  = None
         st.session_state["s_delta"]   = (_dmin, _dmax)
         st.session_state["s_top"]     = int(entry.get("top_n", 10))
         if entry.get("flow") == "roll":
@@ -205,8 +209,8 @@ def tab_single() -> None:
 
     # ── Group 3: Filters ──────────────────────────────────────────────────────
     with st.container(border=True):
-        n1, n2, n3, n4, n5, n6 = st.columns(
-            [1, 1, 1, 1, 2, 1], vertical_alignment="top",
+        n1, n2, n3, n4, n5, n6, n7, n8 = st.columns(
+            [1, 1, 1, 1, 1, 1, 2, 1], vertical_alignment="top",
         )
         with n1:
             min_dte = st.number_input("Min DTE", value=30, min_value=1,
@@ -224,10 +228,22 @@ def tab_single() -> None:
                 key="s_min_vol",
             )
         with n5:
+            min_ivpp = st.number_input(
+                "Min IV+pp", value=None, step=0.5, format="%.1f",
+                placeholder="none", key="s_min_ivpp",
+                help="Floor on IV+pp (pp). Blank = no filter.",
+            )
+        with n6:
+            min_ann = st.number_input(
+                "Min Ann%", value=None, step=1.0, format="%.1f",
+                placeholder="none", key="s_min_ann",
+                help="Floor on Ann% (annualized yield). Blank = no filter.",
+            )
+        with n7:
             delta_range = st.slider("Delta Range (abs value)", 0.0, 1.0,
                                     default_delta_range(False), step=0.05,
                                     key="s_delta")
-        with n6:
+        with n8:
             top_n = st.number_input("Top N", value=10, min_value=1,
                                     max_value=50, key="s_top")
 
@@ -516,6 +532,8 @@ def tab_single() -> None:
             "max_dte": int(max_dte_inp),
             "min_oi": int(min_oi),
             "min_vol": int(min_vol),
+            "min_ivpp": min_ivpp,
+            "min_ann": min_ann,
             "top_n": int(top_n),
             "roll_exp_str": roll_exp.strftime("%Y-%m-%d") if rolling else None,
             "roll_strike": roll_strike if rolling else None,
@@ -695,7 +713,9 @@ def tab_single() -> None:
     st.subheader("Top candidates — all chains")
     show_scan_results(df_filt, mode_r, buy_r, rcc,
                        res["min_oi"], res["top_n"],
-                       res.get("min_vol", 0))
+                       res.get("min_vol", 0),
+                       min_ivpp=res.get("min_ivpp"),
+                       min_ann=res.get("min_ann"))
 
     # ── Monte Carlo trade analyzer ────────────────────────────────────────
     # Pick any candidate from the ranked table above and simulate its

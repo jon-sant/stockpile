@@ -385,6 +385,10 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
             st.session_state[f"{k}_max_dte"]  = max(1, int(entry.get("max_dte", 90)))
             st.session_state[f"{k}_min_oi"]   = max(0, int(entry.get("min_oi", 25)))
             st.session_state[f"{k}_min_vol"]  = max(0, int(entry.get("min_vol", 1)))
+            # Not persisted with saved watchlists — runtime-only, so reset to
+            # blank rather than carry over a stale filter.
+            st.session_state[f"{k}_min_ivpp"] = None
+            st.session_state[f"{k}_min_ann"]  = None
             st.session_state[f"{k}_delta"]    = (_dmin, _dmax)
             st.session_state[f"{k}_top"]      = max(1, int(entry.get("top_n", 5)))
             st.session_state[f"{k}_opt_type"] = entry.get("option_type", "Calls")
@@ -501,7 +505,8 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
                     )
 
     # ── Controls row 1: filter params ────────────────────────────────────────
-    pc1, pc2, pc3, pc4, pc5, pc6 = st.columns([1, 1, 1, 1, 2, 1])
+    pc1, pc2, pc3, pc4, pc5, pc6, pc7, pc8 = st.columns(
+        [1, 1, 1, 1, 1, 1, 2, 1])
     with pc1:
         port_min_dte = st.number_input("Min DTE", value=30, min_value=1,
                                        key=f"{k}_min_dte")
@@ -515,10 +520,22 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
         port_min_vol = st.number_input("Min Vol", value=1, min_value=0,
                                        key=f"{k}_min_vol")
     with pc5:
+        port_min_ivpp = st.number_input(
+            "Min IV+pp", value=None, step=0.5, format="%.1f",
+            placeholder="none", key=f"{k}_min_ivpp",
+            help="Floor on IV+pp (pp). Blank = no filter.",
+        )
+    with pc6:
+        port_min_ann = st.number_input(
+            "Min Ann%", value=None, step=1.0, format="%.1f",
+            placeholder="none", key=f"{k}_min_ann",
+            help="Floor on Ann% (annualized yield). Blank = no filter.",
+        )
+    with pc7:
         port_delta_range = st.slider("Delta Range", 0.0, 1.0,
                                      default_delta_range(False),
                                      0.05, key=f"{k}_delta")
-    with pc6:
+    with pc8:
         port_top = st.number_input("Top N per ticker", value=5, min_value=1,
                                    key=f"{k}_top")
 
@@ -790,7 +807,8 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
                            int(port_top), int(port_min_vol),
                            delta_range=port_delta_range, buy=stored_buy,
                            allow_investigate=_allow_investigate,
-                           provider=_lb_provider)
+                           provider=_lb_provider,
+                           min_ivpp=port_min_ivpp, min_ann=port_min_ann)
 
     for res in results:
         pos    = res["position"]
@@ -886,6 +904,8 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
                     min_vol=int(port_min_vol),
                     opt_type="calls",
                     buy=stored_buy,
+                    min_ivpp=port_min_ivpp,
+                    min_ann=port_min_ann,
                 )
 
             if stored_opt_type in ("puts", "both"):
@@ -908,6 +928,8 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
                     min_vol=int(port_min_vol),
                     opt_type="puts",
                     buy=stored_buy,
+                    min_ivpp=port_min_ivpp,
+                    min_ann=port_min_ann,
                 )
 
             show_iv_chart(df_filt, spot, stored_side,
@@ -932,7 +954,8 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
             st.markdown("**Top candidates**")
             show_scan_results(df_filt, stored_side, stored_buy, _table_roll_close,
                                int(port_min_oi), int(port_top),
-                               int(port_min_vol))
+                               int(port_min_vol),
+                               min_ivpp=port_min_ivpp, min_ann=port_min_ann)
 
     # Portfolio HTML download
     from options_scanner.report import render_portfolio_html
