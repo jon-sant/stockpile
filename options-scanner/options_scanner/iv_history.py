@@ -31,8 +31,28 @@ import pandas as pd
 
 _DEFAULT_DB = Path(__file__).resolve().parent.parent / "cache" / "iv_history.db"
 _MIN_HISTORY = 30          # pooled observations required before percentiles mean anything
+_MIN_HISTORY_BUCKETED = 15  # lower bar per delta×DTE bucket — same-bucket obs are scarcer
 _REQUIRED_COLS = ("type", "strike", "expiration", "dte", "iv_excess")
 _NEW_COLS = ("mid", "delta", "ann_yield_pct")  # added post-launch; nullable for old rows
+
+_DELTA_STEP = 0.05
+_DTE_BANDS: tuple[tuple[int, int | None], ...] = ((0, 14), (15, 45), (46, 90), (91, None))
+
+
+def _dte_band(dte: int) -> str:
+    """Which DTE bucket `dte` falls into, as a stable string key."""
+    for lo, hi in _DTE_BANDS:
+        if dte >= lo and (hi is None or dte <= hi):
+            return f"{lo}-{hi if hi is not None else '+'}"
+    return f"{_DTE_BANDS[-1][0]}-+"
+
+
+def _bucket(delta: float, dte: int) -> tuple[float, str]:
+    """Cohort key for a contract: |delta| rounded to the nearest 0.05,
+    paired with its DTE band. Two contracts in the same bucket are
+    "similar enough" to pool for a historical-percentile comparison."""
+    rounded_delta = round(abs(delta) / _DELTA_STEP) * _DELTA_STEP
+    return (round(rounded_delta, 10), _dte_band(int(dte)))
 
 
 def _db_path() -> Path:
@@ -129,6 +149,59 @@ def _pool(ticker: str, window_days: int) -> np.ndarray:
     return np.asarray(vals, dtype=float)
 
 
+def _pool_rows(ticker: str, window_days: int, value_col: str) -> pd.DataFrame:
+    """Trailing-window (delta, dte, value_col) rows for bucketed pooling.
+    Rows missing delta/dte/value_col (pre-PR1 legacy rows, or a value that
+    was never recorded) are dropped — they can't be bucketed or ranked."""
+    cutoff = (date.today() - timedelta(days=window_days)).isoformat()
+    cols = ["delta", "dte", value_col]
+    try:
+        with _connect() as conn:
+            df = pd.read_sql_query(
+                f"SELECT delta, dte, {value_col} FROM iv_history "
+                "WHERE ticker = ? AND scan_date >= ?",
+                conn, params=(ticker.upper(), cutoff),
+            )
+    except sqlite3.Error:
+        return pd.DataFrame(columns=cols)
+    return df.dropna(subset=["delta", "dte", value_col])
+
+
+def _bucketed_percentile(ticker: str, values, deltas, dtes,
+                         window_days: int, value_col: str,
+                         transform=lambda v, d: v) -> np.ndarray:
+    """Shared engine for percentile_for/ann_delta_percentile_for: pool
+    `value_col`'s trailing history bucketed by delta×DTE, apply `transform`
+    to both the pool and the query values (identity for IV+pp, ÷|delta|
+    for Ann%/Delta), then rank each query value within its own bucket's
+    pool. NaN when the bucket has fewer than _MIN_HISTORY_BUCKETED rows."""
+    values = np.asarray(pd.Series(values).to_numpy(), dtype=float)
+    deltas = np.asarray(pd.Series(deltas).to_numpy(), dtype=float)
+    dtes = np.asarray(pd.Series(dtes).to_numpy(), dtype=float)
+    out = np.full(values.shape, np.nan)
+
+    pool = _pool_rows(ticker, window_days, value_col)
+    if pool.empty:
+        return out
+    pool = pool.copy()
+    pool["_bucket"] = [_bucket(d, t) for d, t in zip(pool["delta"], pool["dte"])]
+    pool["_value"] = transform(pool[value_col].to_numpy(), pool["delta"].to_numpy())
+
+    for i, (v, d, t) in enumerate(zip(values, deltas, dtes)):
+        if not (np.isfinite(v) and np.isfinite(d) and np.isfinite(t)):
+            continue
+        sub = pool.loc[pool["_bucket"] == _bucket(d, t), "_value"].to_numpy()
+        sub = sub[np.isfinite(sub)]
+        if sub.size < _MIN_HISTORY_BUCKETED:
+            continue
+        q = transform(np.array([v]), np.array([d]))[0]
+        if not np.isfinite(q):
+            continue
+        sub = np.sort(sub)
+        out[i] = 100.0 * np.searchsorted(sub, q, side="right") / sub.size
+    return out
+
+
 def history_for(ticker: str, window_days: int = 30) -> pd.DataFrame:
     """Raw trailing-window scan-history rows for `ticker`.
 
@@ -154,14 +227,43 @@ def history_for(ticker: str, window_days: int = 30) -> pd.DataFrame:
     return df
 
 
-def percentile_for(ticker: str, iv_excess, window_days: int = 30) -> np.ndarray:
+def percentile_for(ticker: str, iv_excess, window_days: int = 30,
+                    deltas=None, dtes=None) -> np.ndarray:
     """Percentile rank (0–100) of each iv_excess value within the ticker's
-    trailing-window pool. Returns NaN for every row during cold start
-    (fewer than _MIN_HISTORY pooled observations)."""
-    values = np.asarray(pd.Series(iv_excess).to_numpy(), dtype=float)
-    pool = _pool(ticker, window_days)
-    if pool.size < _MIN_HISTORY:
-        return np.full(values.shape, np.nan)
-    pool.sort()
-    ranks = np.searchsorted(pool, values, side="right")
-    return 100.0 * ranks / pool.size
+    trailing-window pool.
+
+    Without `deltas`/`dtes`: pools the ticker's WHOLE chain history
+    together (original, unbucketed behavior — kept for backward
+    compatibility). NaN for every row during cold start (fewer than
+    _MIN_HISTORY pooled observations).
+
+    With `deltas`/`dtes` supplied: pools only same delta×DTE-bucket
+    history (see `_bucket`), so a 7-DTE 0.10-delta contract is ranked
+    against similar contracts, not diluted by a 90-DTE 0.60-delta one.
+    NaN when that bucket has fewer than _MIN_HISTORY_BUCKETED rows.
+    """
+    if deltas is None or dtes is None:
+        values = np.asarray(pd.Series(iv_excess).to_numpy(), dtype=float)
+        pool = _pool(ticker, window_days)
+        if pool.size < _MIN_HISTORY:
+            return np.full(values.shape, np.nan)
+        pool.sort()
+        ranks = np.searchsorted(pool, values, side="right")
+        return 100.0 * ranks / pool.size
+    return _bucketed_percentile(ticker, iv_excess, deltas, dtes,
+                                window_days, "iv_excess")
+
+
+def ann_delta_percentile_for(ticker: str, ann_yield_pct, deltas, dtes,
+                              window_days: int = 30) -> np.ndarray:
+    """Percentile rank (0–100) of each contract's Ann% ÷ |Delta| within
+    the ticker's own delta×DTE-bucketed trailing history. Requires PR1's
+    `ann_yield_pct`/`delta` columns; rows recorded before that (NULL)
+    are excluded from the pool. NaN when the bucket has fewer than
+    _MIN_HISTORY_BUCKETED rows, or when a row's own delta is ~0."""
+    def _yield_per_delta(v, d):
+        safe_d = np.where(np.abs(d) > 1e-6, np.abs(d), np.nan)
+        return v / safe_d
+    return _bucketed_percentile(ticker, ann_yield_pct, deltas, dtes,
+                                window_days, "ann_yield_pct",
+                                transform=_yield_per_delta)

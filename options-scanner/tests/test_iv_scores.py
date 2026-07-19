@@ -96,7 +96,8 @@ def test_percentile_uses_history_and_is_nan_without_it():
     mask = np.ones(len(df), dtype=bool)
 
     class _FakeHistory:
-        def percentile_for(self, ticker, excess, window_days=30):
+        def percentile_for(self, ticker, excess, window_days=30,
+                           deltas=None, dtes=None):
             return np.full(len(excess), 75.0)
 
     ctx = ScoreContext(ticker="X", history=_FakeHistory())
@@ -107,6 +108,65 @@ def test_percentile_uses_history_and_is_nan_without_it():
     none_ctx = ScoreContext(ticker="X", history=None)
     score2, _ = iv_scores.score(df, mask, none_ctx, ("percentile", frozenset()))
     assert np.isnan(score2).all()
+
+
+def test_percentile_passes_delta_dte_when_present():
+    df = _scored_df()
+    df["delta"] = [0.3, 0.3, 0.3, 0.3, 0.3]
+    df["dte"] = [30, 30, 30, 30, 30]
+    mask = np.ones(len(df), dtype=bool)
+
+    captured = {}
+
+    class _FakeHistory:
+        def percentile_for(self, ticker, excess, window_days=30,
+                           deltas=None, dtes=None):
+            captured["deltas"] = deltas
+            captured["dtes"] = dtes
+            return np.full(len(excess), 50.0)
+
+    ctx = ScoreContext(ticker="X", history=_FakeHistory())
+    iv_scores.score(df, mask, ctx, ("percentile", frozenset()))
+    assert captured["deltas"] is not None
+    assert captured["dtes"] is not None
+
+
+def test_ann_delta_percentile_uses_history_and_is_nan_without_it():
+    df = _scored_df()
+    df["ann_yield_pct"] = [10.0, 12.0, 8.0, 15.0, 11.0]
+    df["delta"] = [0.3, 0.3, 0.3, 0.3, 0.3]
+    df["dte"] = [30, 30, 30, 30, 30]
+    mask = np.ones(len(df), dtype=bool)
+
+    class _FakeHistory:
+        def ann_delta_percentile_for(self, ticker, ann_yield_pct, deltas,
+                                     dtes, window_days=30):
+            return np.full(len(ann_yield_pct), 80.0)
+
+    ctx = ScoreContext(ticker="X", history=_FakeHistory())
+    score, label = iv_scores.score(
+        df, mask, ctx, ("ann_delta_percentile", frozenset()))
+    assert label == "Ann/Δ %ile"
+    assert np.allclose(score, 80.0)
+
+    none_ctx = ScoreContext(ticker="X", history=None)
+    score2, _ = iv_scores.score(
+        df, mask, none_ctx, ("ann_delta_percentile", frozenset()))
+    assert np.isnan(score2).all()
+
+
+def test_ann_delta_percentile_nan_when_columns_missing():
+    df = _scored_df()  # no ann_yield_pct/delta/dte columns
+    mask = np.ones(len(df), dtype=bool)
+
+    class _FakeHistory:
+        def ann_delta_percentile_for(self, *a, **k):
+            raise AssertionError("should not be called without required cols")
+
+    ctx = ScoreContext(ticker="X", history=_FakeHistory())
+    score, _ = iv_scores.score(
+        df, mask, ctx, ("ann_delta_percentile", frozenset()))
+    assert np.isnan(score).all()
 
 
 def test_zscore_nonzero_with_per_expiration_on_thin_chain():
