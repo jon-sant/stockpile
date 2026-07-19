@@ -23,11 +23,15 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from collections.abc import Generator
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+from options_scanner import sqlite_util
 
 _DEFAULT_DB = Path(__file__).resolve().parent.parent / "cache" / "iv_history.db"
 _MIN_HISTORY = 30          # pooled observations required before percentiles mean anything
@@ -62,32 +66,31 @@ def _db_path() -> Path:
     return Path(os.environ.get("OSC_IV_HISTORY_DB", str(_DEFAULT_DB)))
 
 
-def _connect() -> sqlite3.Connection:
-    path = _db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS iv_history (
-            ticker     TEXT NOT NULL,
-            scan_date  TEXT NOT NULL,
-            type       TEXT,
-            strike     REAL,
-            expiration TEXT,
-            dte        INTEGER,
-            iv_excess  REAL
+@contextmanager
+def _connect() -> Generator[sqlite3.Connection]:
+    with sqlite_util.connect(_db_path()) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS iv_history (
+                ticker     TEXT NOT NULL,
+                scan_date  TEXT NOT NULL,
+                type       TEXT,
+                strike     REAL,
+                expiration TEXT,
+                dte        INTEGER,
+                iv_excess  REAL
+            )
+            """
         )
-        """
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_ticker_date "
-        "ON iv_history (ticker, scan_date)"
-    )
-    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(iv_history)")}
-    for col in _NEW_COLS:
-        if col not in existing_cols:
-            conn.execute(f"ALTER TABLE iv_history ADD COLUMN {col} REAL")
-    return conn
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ticker_date "
+            "ON iv_history (ticker, scan_date)"
+        )
+        existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(iv_history)")}
+        for col in _NEW_COLS:
+            if col not in existing_cols:
+                conn.execute(f"ALTER TABLE iv_history ADD COLUMN {col} REAL")
+        yield conn
 
 
 def record_scan(ticker: str, df: pd.DataFrame,
