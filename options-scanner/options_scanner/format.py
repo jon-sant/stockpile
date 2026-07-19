@@ -8,6 +8,9 @@ instead of being rounded to the nearest dollar.
 
 from __future__ import annotations
 
+import numpy as np
+import pandas as pd
+
 # d3-format string for option strikes on Altair/Vega and Plotly
 # charts. The `~` trims trailing zeros so whole strikes render as
 # "$145" while fractional strikes keep their decimals ("$142.5",
@@ -36,6 +39,34 @@ def fmt_strike(strike) -> str:
     if x.is_integer():
         return f"${x:,.0f}"
     return f"${x:,.2f}".rstrip("0").rstrip(".")
+
+
+def stars_for(scores) -> np.ndarray:
+    """0-5 star rating at 0.5 resolution, from each row's percentile rank
+    of `scores` within the same set — "how does this compare to the rest
+    of what's on screen right now," same top-N-of-this-basket framing as
+    everywhere else in this codebase, not a fixed external calibration.
+
+    NaN scores rank last (na_option="bottom") and are then blanked back
+    out to NaN in the result, so a row with no score (e.g. cold-start
+    percentile) doesn't quietly render as "0 stars" — it renders as no
+    rating at all (fmt_stars("") for the UI).
+    """
+    s = pd.Series(scores)
+    ranks = s.rank(pct=True, na_option="bottom").to_numpy(dtype=float)
+    stars = np.round(ranks * 5.0 * 2.0) / 2.0
+    stars[s.isna().to_numpy()] = np.nan
+    return stars
+
+
+def fmt_stars(n: float) -> str:
+    """Render a 0-5, 0.5-resolution star rating as a short string:
+    2.0 -> '★★', 2.5 -> '★★½'. NaN -> '' (blank, not '0 stars')."""
+    if n != n:  # NaN
+        return ""
+    full = int(n)
+    half = (n - full) >= 0.5
+    return "★" * full + ("½" if half else "")
 
 
 def strike_tick_values(strikes, lo=None, hi=None, max_ticks=16):
