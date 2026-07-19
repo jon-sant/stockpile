@@ -104,15 +104,39 @@ def _vrp(df: pd.DataFrame, fit_mask, ctx) -> tuple[np.ndarray, str]:
 
 def _percentile(df: pd.DataFrame, fit_mask, ctx) -> tuple[np.ndarray, str]:
     """Percentile rank of each contract's IV excess within the ticker's
-    own trailing history (needs the scan-history store)."""
+    own delta×DTE-bucketed trailing history (needs the scan-history store).
+
+    Bucketed when `delta`/`dte` are present on `df` (the normal case —
+    falls back to whole-chain pooling otherwise, matching
+    `iv_history.percentile_for`'s own backward-compatible default)."""
     excess = df["iv_excess"]
     history = getattr(ctx, "history", None)
     ticker = getattr(ctx, "ticker", None)
     if history is None or not ticker:
         return np.full(len(df), np.nan), "IV %ile"
+    has_bucket_cols = {"delta", "dte"} <= set(df.columns)
     pct = history.percentile_for(
-        ticker, excess, window_days=getattr(ctx, "window_days", 30))
+        ticker, excess, window_days=getattr(ctx, "window_days", 30),
+        deltas=df["delta"] if has_bucket_cols else None,
+        dtes=df["dte"] if has_bucket_cols else None,
+    )
     return np.asarray(pct, dtype=float), "IV %ile"
+
+
+def _ann_delta_percentile(df: pd.DataFrame, fit_mask, ctx) -> tuple[np.ndarray, str]:
+    """Percentile rank of each contract's Ann% ÷ |Delta| within the
+    ticker's own delta×DTE-bucketed trailing history — the literal
+    "is this yield historically rich for this ETF at this delta/DTE"
+    signal (needs the scan-history store)."""
+    history = getattr(ctx, "history", None)
+    ticker = getattr(ctx, "ticker", None)
+    needed = {"ann_yield_pct", "delta", "dte"}
+    if history is None or not ticker or not needed <= set(df.columns):
+        return np.full(len(df), np.nan), "Ann/Δ %ile"
+    pct = history.ann_delta_percentile_for(
+        ticker, df["ann_yield_pct"], df["delta"], df["dte"],
+        window_days=getattr(ctx, "window_days", 30))
+    return np.asarray(pct, dtype=float), "Ann/Δ %ile"
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────
@@ -154,6 +178,12 @@ REGISTRY: dict[str, dict] = {
         "label":    "Percentile — IV richness vs. history",
         "enabled":  True,
     },
+    "ann_delta_percentile": {
+        "fn":       _ann_delta_percentile,
+        "defaults": {},
+        "label":    "Ann%/Delta Percentile — vs. own bucketed history",
+        "enabled":  True,
+    },
 }
 
 # Default: raw IV+pp — reproduces current ranking exactly.
@@ -170,6 +200,7 @@ SCORE_DISPLAY: dict[str, tuple[float, str]] = {
     "Score":   (1.0,   "%+.2f"),
     "VRP":     (1.0,   "%.2f"),
     "IV %ile": (1.0,   "%.0f"),
+    "Ann/Δ %ile": (1.0, "%.0f"),
 }
 
 

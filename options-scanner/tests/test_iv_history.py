@@ -136,6 +136,112 @@ def test_schema_migration_preserves_existing_rows():
     assert pd.isna(hist.iloc[0]["ann_yield_pct"])
 
 
+def test_dte_band_boundaries():
+    assert iv_history._dte_band(14) == "0-14"
+    assert iv_history._dte_band(15) == "15-45"
+    assert iv_history._dte_band(45) == "15-45"
+    assert iv_history._dte_band(46) == "46-90"
+    assert iv_history._dte_band(90) == "46-90"
+    assert iv_history._dte_band(91) == "91-+"
+    assert iv_history._dte_band(365) == "91-+"
+
+
+def test_bucket_uses_absolute_delta():
+    # A put's negative delta buckets the same as the equivalent-magnitude
+    # call delta — cohorting is about |delta|, not direction.
+    assert iv_history._bucket(-0.30, 30) == iv_history._bucket(0.30, 30)
+    assert iv_history._bucket(0.28, 30) == iv_history._bucket(0.30, 30)  # rounds to 0.30
+    assert iv_history._bucket(0.30, 30) != iv_history._bucket(0.30, 60)  # diff DTE band
+
+
+def _bucketed_snapshot(n: int, delta: float, dte: int, base_iv: float = 0.0,
+                       base_ann: float = 10.0) -> pd.DataFrame:
+    return pd.DataFrame({
+        "type": ["put"] * n,
+        "strike": [100.0 + i for i in range(n)],
+        "expiration": ["2026-06-19"] * n,
+        "dte": [dte] * n,
+        "iv_excess": [base_iv + 0.001 * i for i in range(n)],
+        "mid": [1.0] * n,
+        "delta": [delta] * n,
+        "ann_yield_pct": [base_ann + 0.1 * i for i in range(n)],
+    })
+
+
+def test_bucketed_percentile_isolates_cohorts():
+    today = date.today()
+    # Bucket A: delta 0.20, dte 30 — low iv_excess distribution (0..0.019).
+    # Bucket B: delta 0.45, dte 60 — high iv_excess distribution (5..5.019).
+    for d in range(3):
+        iv_history.record_scan(
+            "SPY", _bucketed_snapshot(20, delta=0.20, dte=30, base_iv=0.0),
+            scan_day=today - timedelta(days=d + 1))
+        iv_history.record_scan(
+            "SPY", _bucketed_snapshot(20, delta=0.45, dte=60, base_iv=5.0),
+            scan_day=today - timedelta(days=d + 10))
+
+    # A query at bucket A's own level should rank high within A, even
+    # though it would rank at 0 if pooled against bucket B's distribution.
+    pct = iv_history.percentile_for(
+        "SPY", pd.Series([0.02]), deltas=pd.Series([0.20]),
+        dtes=pd.Series([30]))
+    assert pct[0] >= 90.0  # near/above the top of bucket A's own pool
+
+    pct_b = iv_history.percentile_for(
+        "SPY", pd.Series([0.02]), deltas=pd.Series([0.45]),
+        dtes=pd.Series([60]))
+    assert np.isnan(pct_b).all() or pct_b[0] <= 5.0  # far below bucket B's pool
+
+
+def test_bucketed_percentile_cold_start_per_bucket():
+    # 28 total rows for the ticker, but split across two buckets (14 each)
+    # so neither bucket alone reaches _MIN_HISTORY_BUCKETED (15).
+    today = date.today()
+    for d in range(2):
+        iv_history.record_scan(
+            "QQQ", _bucketed_snapshot(7, delta=0.20, dte=30),
+            scan_day=today - timedelta(days=d + 1))
+        iv_history.record_scan(
+            "QQQ", _bucketed_snapshot(7, delta=0.45, dte=60),
+            scan_day=today - timedelta(days=d + 10))
+    pct = iv_history.percentile_for(
+        "QQQ", pd.Series([0.0]), deltas=pd.Series([0.20]),
+        dtes=pd.Series([30]))
+    assert np.isnan(pct).all()
+
+
+def test_percentile_for_backward_compatible_without_bucket_args():
+    # Omitting deltas/dtes keeps the original whole-pool behavior.
+    today = date.today()
+    for d in range(5):
+        iv_history.record_scan(
+            "AMD", _snapshot(10, base=0.0), scan_day=today - timedelta(days=d + 1))
+    pct = iv_history.percentile_for("AMD", pd.Series([100.0]))
+    assert pct[0] >= 99.0
+
+
+def test_ann_delta_percentile_ranks_within_bucket():
+    today = date.today()
+    for d in range(3):
+        iv_history.record_scan(
+            "SPY", _bucketed_snapshot(20, delta=0.20, dte=30, base_ann=10.0),
+            scan_day=today - timedelta(days=d + 1))
+    # ann_yield_pct/|delta| for the seeded rows ranges ~ (10/0.2)=50 to
+    # (11.9/0.2)=59.5; a query well above that should rank near 100.
+    pct = iv_history.ann_delta_percentile_for(
+        "SPY", pd.Series([20.0]), pd.Series([0.20]), pd.Series([30]))
+    assert pct[0] >= 90.0  # 20/0.2=100, far above the pool
+
+
+def test_ann_delta_percentile_skips_legacy_null_rows():
+    # Legacy rows (recorded before PR1) have NULL ann_yield_pct/delta and
+    # must not crash or pollute the pool.
+    iv_history.record_scan("AMD", _snapshot_legacy(20), scan_day=date.today())
+    pct = iv_history.ann_delta_percentile_for(
+        "AMD", pd.Series([50.0]), pd.Series([0.30]), pd.Series([30]))
+    assert np.isnan(pct).all()
+
+
 def test_record_and_read_round_trip_includes_new_columns():
     iv_history.record_scan("AMD", _snapshot(3), scan_day=date.today())
     hist = iv_history.history_for("AMD")
