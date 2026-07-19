@@ -30,7 +30,7 @@ import streamlit as st
 
 from stocks_shared.yahoo import RateLimitError
 
-from options_scanner.compute import capital_allocator
+from options_scanner.compute import capital_allocator, correlation
 from options_scanner.display.iv_chart import show_iv_chart
 from options_scanner.display.leaderboard import build_leaderboard, render_leaderboard
 from options_scanner.display.portfolio_action_card import render_portfolio_action_card
@@ -871,11 +871,17 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
                         st.info("No candidates to allocate against — loosen "
                                 "the scan filters above.")
                     else:
+                        _alloc_tickers = _alloc_board["ticker"].unique().tolist()
+                        _corr = None
+                        if len(_alloc_tickers) > 1:
+                            with st.spinner("Checking cross-ticker correlation…"):
+                                _corr = correlation.pairwise_log_return_corr(
+                                    _alloc_tickers)
                         with st.spinner("Running per-candidate Monte Carlo…"):
                             _candidates = capital_allocator.candidates_from_board(
                                 _alloc_board)
                         _alloc = capital_allocator.allocate_capital(
-                            _candidates, float(_budget))
+                            _candidates, float(_budget), corr=_corr)
                         if _alloc.empty:
                             st.info("No candidates cleared a positive "
                                     "risk-adjusted edge for this budget.")
@@ -910,6 +916,24 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
                                 f"of ${_budget:,.2f} across {len(_alloc)} "
                                 "position(s)."
                             )
+                            if _corr is not None:
+                                _picked = _alloc["ticker"].tolist()
+                                _pairs = [
+                                    (a, b, _corr.loc[a, b])
+                                    for i, a in enumerate(_picked)
+                                    for b in _picked[i + 1:]
+                                    if a in _corr.index and b in _corr.columns
+                                    and pd.notna(_corr.loc[a, b])
+                                    and abs(_corr.loc[a, b]) > 0.7
+                                ]
+                                if _pairs:
+                                    _pair_strs = ", ".join(
+                                        f"{a}/{b} ({c:+.2f})" for a, b, c in _pairs)
+                                    st.warning(
+                                        f"Correlated picks in this allocation: "
+                                        f"{_pair_strs} — consider whether this "
+                                        "concentrates risk more than it looks."
+                                    )
 
     for res in results:
         pos    = res["position"]
