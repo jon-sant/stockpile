@@ -3,10 +3,30 @@
 Mirrors `background_scan.py`'s singleton-daemon-thread shape (started
 once via `start_mc_worker_once()`, guarded by `st.cache_resource` in
 run_app.py so it only ever spawns once per server process), but the
-thread dispatches CPU-bound Monte Carlo work to a `ProcessPoolExecutor`
-instead of doing I/O itself — `mc_batch.compute_mc_for_row` is vectorized
-NumPy with no shared state between rows, so it's an embarrassingly
-parallel workload across however many CPU cores are available.
+thread dispatches Monte Carlo work to a `ThreadPoolExecutor` instead of
+doing I/O itself.
+
+Threads, not processes: `mc_batch.compute_mc_for_row` is vectorized
+NumPy (path generation, payoff/metrics — all large-array ufunc/BLAS
+calls), and NumPy releases the GIL for those, so a thread pool still
+gets real cross-core parallelism for the expensive part of the work
+without any of the costs below.
+
+A `ProcessPoolExecutor` was the original design and does NOT work here:
+spawning a new process re-imports/re-bootstraps the *parent* process's
+entry point, and under `streamlit run options-scanner/run_app.py` that
+entry point is Streamlit's own launcher — code this project doesn't
+control and can't wrap in the `if __name__ == "__main__":` guard
+`multiprocessing` requires on Windows (spawn is the only start method
+there; fork isn't available). In production this raised
+`RuntimeError: An attempt has been made to start a new process before
+the current process has finished its bootstrapping phase` on every
+tick with pending work, which — since the tick's except-and-retry never
+lets the backlog shrink — fired every ~20s forever, which is also the
+likely cause of the flood of "missing ScriptRunContext" warnings
+reported alongside it (each failed spawn attempt partially re-imports
+the host process). Threads avoid all of this: no new OS process, no
+re-import of anything.
 
 Poll interval is short (~20s, vs. background_scan's hourly poll) and can
 be woken early via `restart_with_priority()` right after any tab
@@ -14,48 +34,43 @@ finishes a scan — that also discards any queued-but-not-yet-started
 low-priority batches (recreating the pool) so the just-scanned ticker's
 rows get picked up first. In-flight (already-running) tasks finish
 naturally; only queued work is dropped.
-
-`mc_batch.py` (the actual compute) has no Streamlit import and no
-import-time side effects — required for it to be safely importable in a
-spawned worker process. `multiprocessing.get_context("spawn")` is used
-explicitly since spawn is the only start method available on Windows.
 """
 
 from __future__ import annotations
 
 import logging
-import multiprocessing
 import os
 import threading
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from options_scanner import iv_history, mc_batch
 
 log = logging.getLogger(__name__)
 
-_BATCH_SIZE = 25       # rows per ProcessPoolExecutor task — amortizes IPC/pickling overhead
+_BATCH_SIZE = 25       # rows per executor task — amortizes dispatch overhead
 _ROWS_PER_POLL = 200   # pending rows pulled and split into batches per tick
 _POLL_SECONDS = 20     # short poll so a fresh scan feels responsive
-_MP_CONTEXT = multiprocessing.get_context("spawn")  # Windows requires spawn
 
 _lock = threading.Lock()
-_executor: ProcessPoolExecutor | None = None
+_executor: ThreadPoolExecutor | None = None
 _priority_ticker: str | None = None
 _wake = threading.Event()
 _idle_logged = False  # avoid re-logging "backlog cleared" on every idle poll
 
 
 def _pool_size() -> int:
-    """Leave one core free for the Streamlit UI thread itself."""
+    """Leave one core free for the Streamlit UI thread itself. Threads
+    are cheap, so this can be generous — NumPy's GIL release means more
+    threads than cores still helps rather than just adding overhead."""
     return max(1, (os.cpu_count() or 2) - 1)
 
 
-def _get_executor() -> ProcessPoolExecutor:
+def _get_executor() -> ThreadPoolExecutor:
     global _executor
     with _lock:
         if _executor is None:
-            _executor = ProcessPoolExecutor(
-                max_workers=_pool_size(), mp_context=_MP_CONTEXT)
+            _executor = ThreadPoolExecutor(
+                max_workers=_pool_size(), thread_name_prefix="mc-worker")
         return _executor
 
 
@@ -79,10 +94,6 @@ def _tick() -> None:
 
     rows = pending.to_dict("records")
     executor = _get_executor()
-    # Compute happens inside spawned worker processes, which don't share
-    # this process's logging handlers — so both the start and end lines
-    # are logged here in the scheduler thread (start at dispatch time,
-    # end once each row's result comes back), not from inside mc_batch.
     for row in rows:
         log.info("mc_background: rowid=%s start (%s %s %s %s)",
                  row["rowid"], row["ticker"], row["type"], row["strike"],
@@ -128,7 +139,7 @@ def restart_with_priority(ticker: str) -> None:
     """Call right after any tab's scan completes (after `_enrich()` ->
     `iv_history.record_scan()` returns). Prioritizes `ticker`'s rows on
     the next tick, wakes the scheduler immediately instead of waiting out
-    the poll interval, and recreates the process pool so any
+    the poll interval, and recreates the thread pool so any
     queued-but-not-yet-started low-priority batches are dropped in favor
     of the just-scanned ticker. In-flight (already-running) tasks finish
     naturally — only queued work is cancelled.

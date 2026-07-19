@@ -1,9 +1,10 @@
 """Batch Monte Carlo computation for the background worker.
 
-Pure-compute module — deliberately has NO `streamlit` import and no
-import-time side effects, since it must be safe to import inside a
-spawned worker process (mc_background.py's ProcessPoolExecutor uses the
-"spawn" start method, required on Windows).
+Pure-compute module — deliberately has no `streamlit` import, so it's
+cheap to import and easy to test in isolation. Dispatched by
+mc_background.py's `ThreadPoolExecutor` (not a process pool — see that
+module's docstring for why `ProcessPoolExecutor` doesn't work under
+`streamlit run`).
 
 `compute_mc_for_row` builds a long AND a short single-leg Position from
 one persisted chain row (a plain dict, as read back from
@@ -141,9 +142,9 @@ def compute_mc_for_row(row: dict) -> dict:
 
 def run_batch(rows: list[dict]) -> list[tuple[int, dict | None, str | None]]:
     """Compute Monte Carlo metrics for a batch of pending rows — the unit
-    of work handed to `ProcessPoolExecutor.submit`, batched (~20-50 rows)
-    to amortize per-dispatch IPC/pickling overhead. One row's failure
-    never aborts the rest of the batch.
+    of work handed to `ThreadPoolExecutor.submit`, batched (~20-50 rows)
+    so a slow row doesn't force `as_completed` to wait on single-row
+    futures one at a time. One row's failure never aborts the batch.
 
     Returns (rowid, results-or-None, error-or-None) per row.
     """
