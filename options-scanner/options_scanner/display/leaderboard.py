@@ -725,6 +725,8 @@ def _render_table(board: pd.DataFrame, side: str, min_vol: int,
     cols.update({
         "Delta": board["delta"].round(2),
         "Ann%":  board["ann_yield_pct"].round(1),
+        "Ann% / Delta": (board["ann_yield_pct"]
+                         / board["delta"].abs().replace(0, float("nan"))).round(1),
         "OI":    board["open_interest"],
         "Vol":   board["volume"],
     })
@@ -760,6 +762,11 @@ def _render_table(board: pd.DataFrame, side: str, min_vol: int,
                                                width=60),
         "Ann%":  st.column_config.NumberColumn("Ann%", format="%.1f%%",
                                                width=65),
+        "Ann% / Delta": st.column_config.NumberColumn(
+            "Ann% / Delta", format="%.1f", width=95,
+            help="Ann% divided by |Delta| — yield per unit of directional "
+                 "exposure. Higher = more yield for the assignment risk "
+                 "taken on."),
         "OI":    st.column_config.NumberColumn("OI", format="%d", width=65),
         "Vol":   st.column_config.NumberColumn("Vol", format="%d", width=65),
     }

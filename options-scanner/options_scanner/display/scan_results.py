@@ -91,6 +91,8 @@ def show_df(sub: pd.DataFrame, roll_close_cost: float | None = None,
     cols.update({
         "Delta":  sub["delta"].round(2),
         "Ann%":   sub["ann_yield_pct"].round(1),
+        "Ann% / Delta": (sub["ann_yield_pct"]
+                         / sub["delta"].abs().replace(0, float("nan"))).round(1),
         "OI":     sub["open_interest"],
         "Vol":    sub["volume"],
     })
@@ -147,6 +149,11 @@ def show_df(sub: pd.DataFrame, roll_close_cost: float | None = None,
                                                width=60),
         "Ann%":  st.column_config.NumberColumn("Ann%", format="%.1f%%",
                                                width=65),
+        "Ann% / Delta": st.column_config.NumberColumn(
+            "Ann% / Delta", format="%.1f", width=95,
+            help="Ann% divided by |Delta| — yield per unit of directional "
+                 "exposure. Higher = more yield for the assignment risk "
+                 "taken on."),
         "OI":    st.column_config.NumberColumn("OI", format="%d",
                                                width=65, help=OI_HELP),
         "Vol":   st.column_config.NumberColumn("Vol", format="%d",
