@@ -523,6 +523,8 @@ def build_leaderboard(results: list[dict], side: str, min_oi: int,
                       top_n: int, min_vol: int = 0,
                       delta_range: tuple[float, float] | None = None,
                       buy: bool = False,
+                      min_ivpp: float | None = None,
+                      min_ann: float | None = None,
                       ) -> pd.DataFrame:
     """Collect a "best per ticker, then fill" leaderboard for one side.
 
@@ -554,6 +556,10 @@ def build_leaderboard(results: list[dict], side: str, min_oi: int,
         sub = df[(df["type"] == side)
                  & (df["open_interest"] >= min_oi)
                  & (df["volume"] >= min_vol)]
+        if min_ivpp is not None:
+            sub = sub[(sub["iv_excess"] * 100) >= min_ivpp]
+        if min_ann is not None:
+            sub = sub[sub["ann_yield_pct"] >= min_ann]
         if delta_range is not None:
             lo, hi = delta_range
             sub = sub[sub["delta"].abs().between(lo, hi)]
@@ -600,7 +606,9 @@ def render_leaderboard(results: list[dict], mode: str, min_oi: int,
                        delta_range: tuple[float, float] | None = None,
                        buy: bool = False,
                        allow_investigate: bool = False,
-                       provider: str = "yahoo") -> None:
+                       provider: str = "yahoo",
+                       min_ivpp: float | None = None,
+                       min_ann: float | None = None) -> None:
     """Render the cross-ticker leaderboard table(s).
 
     `mode` is "call", "put", or "both" (both renders a Calls and a Puts
@@ -629,7 +637,7 @@ def render_leaderboard(results: list[dict], mode: str, min_oi: int,
     rendered_any = False
     for side in sides:
         board = build_leaderboard(results, side, min_oi, top_n, min_vol,
-                                  delta_range, buy)
+                                  delta_range, buy, min_ivpp, min_ann)
         if board.empty:
             continue
         rendered_any = True
@@ -646,6 +654,8 @@ def render_leaderboard(results: list[dict], mode: str, min_oi: int,
             f"(Min OI ≥ {min_oi}, Min Vol ≥ {min_vol}"
             + (f", |delta| {delta_range[0]:.2f}–{delta_range[1]:.2f}"
                if delta_range is not None else "")
+            + (f", IV+pp ≥ {min_ivpp:+.1f}" if min_ivpp is not None else "")
+            + (f", Ann% ≥ {min_ann:.1f}" if min_ann is not None else "")
             + "). Try loosening Min OI / Min Vol — note Vol is *today's* "
               "volume, which is 0 for every contract before the market has "
               "traded."
