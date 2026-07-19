@@ -117,6 +117,8 @@ def tab_single() -> None:
         # rather than carry over a stale filter from a previous scan.
         st.session_state["s_min_ivpp"] = None
         st.session_state["s_min_ann"]  = None
+        st.session_state["s_min_percentile"] = None
+        st.session_state["s_min_ann_delta_percentile"] = None
         st.session_state["s_delta"]   = (_dmin, _dmax)
         st.session_state["s_top"]     = int(entry.get("top_n", 10))
         if entry.get("flow") == "roll":
@@ -246,6 +248,26 @@ def tab_single() -> None:
         with n8:
             top_n = st.number_input("Top N", value=10, min_value=1,
                                     max_value=50, key="s_top")
+
+        p1, p2, _p3 = st.columns([1, 1, 4])
+        with p1:
+            min_percentile = st.number_input(
+                "Min IV %ile", value=None, step=5.0, format="%.0f",
+                min_value=0.0, max_value=100.0,
+                placeholder="none", key="s_min_percentile",
+                help="Floor on IV %ile — how rich today's IV+pp is vs. this "
+                     "ticker's own delta/DTE-bucketed history (0-100). "
+                     "Blank = no filter.",
+            )
+        with p2:
+            min_ann_delta_percentile = st.number_input(
+                "Min Ann/Δ %ile", value=None, step=5.0, format="%.0f",
+                min_value=0.0, max_value=100.0,
+                placeholder="none", key="s_min_ann_delta_percentile",
+                help="Floor on Ann%/Delta %ile — how rich today's yield-per-"
+                     "delta is vs. this ticker's own bucketed history "
+                     "(0-100). Blank = no filter.",
+            )
 
     # ── Surface fit preset pill ───────────────────────────────────────────────
     preset = _surface_fit_controls()
@@ -534,6 +556,8 @@ def tab_single() -> None:
             "min_vol": int(min_vol),
             "min_ivpp": min_ivpp,
             "min_ann": min_ann,
+            "min_percentile": min_percentile,
+            "min_ann_delta_percentile": min_ann_delta_percentile,
             "top_n": int(top_n),
             "roll_exp_str": roll_exp.strftime("%Y-%m-%d") if rolling else None,
             "roll_strike": roll_strike if rolling else None,
@@ -743,7 +767,9 @@ def tab_single() -> None:
                        res["min_oi"], res["top_n"],
                        res.get("min_vol", 0),
                        min_ivpp=res.get("min_ivpp"),
-                       min_ann=res.get("min_ann"))
+                       min_ann=res.get("min_ann"),
+                       min_percentile=res.get("min_percentile"),
+                       min_ann_delta_percentile=res.get("min_ann_delta_percentile"))
 
     # ── Monte Carlo trade analyzer ────────────────────────────────────────
     # Pick any candidate from the ranked table above and simulate its

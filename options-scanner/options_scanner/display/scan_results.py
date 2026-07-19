@@ -203,7 +203,9 @@ def show_scan_results(df: pd.DataFrame, mode: str, buy: bool,
                       min_oi: int, top_n: int,
                       min_vol: int = 0,
                       min_ivpp: float | None = None,
-                      min_ann: float | None = None) -> None:
+                      min_ann: float | None = None,
+                      min_percentile: float | None = None,
+                      min_ann_delta_percentile: float | None = None) -> None:
     """Filter, rank, and render the top-N per option type.
 
     Splits the chain by `mode` ("call", "put", or "both"), sorts by
@@ -213,7 +215,10 @@ def show_scan_results(df: pd.DataFrame, mode: str, buy: bool,
     both sides so the user knows which table is which.
 
     `min_ivpp`/`min_ann` are optional floors on IV+pp (pp) and Ann%
-    (%) — `None` (the UI default, left blank) means no filtering.
+    (%). `min_percentile`/`min_ann_delta_percentile` are optional floors
+    on the historical percentile columns (0-100) — "only show strikes
+    historically rich for this ETF at this delta/DTE." All four default
+    `None` (the UI default, left blank) meaning no filtering.
     """
     iv_asc = buy
     sort_col = "signal_score" if "signal_score" in df.columns else "iv_excess"
@@ -231,6 +236,10 @@ def show_scan_results(df: pd.DataFrame, mode: str, buy: bool,
             sub = sub[(sub["iv_excess"] * 100) >= min_ivpp]
         if min_ann is not None:
             sub = sub[sub["ann_yield_pct"] >= min_ann]
+        if min_percentile is not None and "iv_percentile" in sub.columns:
+            sub = sub[sub["iv_percentile"] >= min_percentile]
+        if min_ann_delta_percentile is not None and "ann_delta_percentile" in sub.columns:
+            sub = sub[sub["ann_delta_percentile"] >= min_ann_delta_percentile]
         sub = sub.head(top_n)
         sub = sub.copy()
         sub["_rank"] = range(1, len(sub) + 1)

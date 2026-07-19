@@ -526,6 +526,8 @@ def build_leaderboard(results: list[dict], side: str, min_oi: int,
                       buy: bool = False,
                       min_ivpp: float | None = None,
                       min_ann: float | None = None,
+                      min_percentile: float | None = None,
+                      min_ann_delta_percentile: float | None = None,
                       ) -> pd.DataFrame:
     """Collect a "best per ticker, then fill" leaderboard for one side.
 
@@ -561,6 +563,10 @@ def build_leaderboard(results: list[dict], side: str, min_oi: int,
             sub = sub[(sub["iv_excess"] * 100) >= min_ivpp]
         if min_ann is not None:
             sub = sub[sub["ann_yield_pct"] >= min_ann]
+        if min_percentile is not None and "iv_percentile" in sub.columns:
+            sub = sub[sub["iv_percentile"] >= min_percentile]
+        if min_ann_delta_percentile is not None and "ann_delta_percentile" in sub.columns:
+            sub = sub[sub["ann_delta_percentile"] >= min_ann_delta_percentile]
         if delta_range is not None:
             lo, hi = delta_range
             sub = sub[sub["delta"].abs().between(lo, hi)]
@@ -609,7 +615,9 @@ def render_leaderboard(results: list[dict], mode: str, min_oi: int,
                        allow_investigate: bool = False,
                        provider: str = "yahoo",
                        min_ivpp: float | None = None,
-                       min_ann: float | None = None) -> None:
+                       min_ann: float | None = None,
+                       min_percentile: float | None = None,
+                       min_ann_delta_percentile: float | None = None) -> None:
     """Render the cross-ticker leaderboard table(s).
 
     `mode` is "call", "put", or "both" (both renders a Calls and a Puts
@@ -638,7 +646,8 @@ def render_leaderboard(results: list[dict], mode: str, min_oi: int,
     rendered_any = False
     for side in sides:
         board = build_leaderboard(results, side, min_oi, top_n, min_vol,
-                                  delta_range, buy, min_ivpp, min_ann)
+                                  delta_range, buy, min_ivpp, min_ann,
+                                  min_percentile, min_ann_delta_percentile)
         if board.empty:
             continue
         rendered_any = True
@@ -657,6 +666,10 @@ def render_leaderboard(results: list[dict], mode: str, min_oi: int,
                if delta_range is not None else "")
             + (f", IV+pp ≥ {min_ivpp:+.1f}" if min_ivpp is not None else "")
             + (f", Ann% ≥ {min_ann:.1f}" if min_ann is not None else "")
+            + (f", IV %ile ≥ {min_percentile:.0f}"
+               if min_percentile is not None else "")
+            + (f", Ann/Δ %ile ≥ {min_ann_delta_percentile:.0f}"
+               if min_ann_delta_percentile is not None else "")
             + "). Try loosening Min OI / Min Vol — note Vol is *today's* "
               "volume, which is 0 for every contract before the market has "
               "traded."
