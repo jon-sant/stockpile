@@ -24,6 +24,7 @@ from options_scanner.ui_theme import (
     section_header,
 )
 from options_scanner.display.scan_stamp import PROVIDER_LABELS, PROVIDER_COLORS
+from options_scanner.tabs.backtest import tab_backtest
 from options_scanner.tabs.gex import tab_gex
 from options_scanner.tabs.live_charts import tab_live_charts
 from options_scanner.tabs.portfolio import tab_portfolio, tab_watchlist
@@ -427,10 +428,10 @@ if _pending_toast:
 (
     panel_single, panel_watchlist, panel_trades, panel_portfolio, panel_gex,
     panel_spreads, panel_directional, panel_neutral,
-    panel_live,
+    panel_backtest, panel_live,
 ) = st.tabs(
     ["Single Ticker", "Watchlist", "Trades", "Portfolio", "GEX",
-     "Spreads", "Directional", "Neutral", "Live Charts"]
+     "Spreads", "Directional", "Neutral", "Backtest", "Live Charts"]
 )
 
 with panel_single:
@@ -456,6 +457,9 @@ with panel_directional:
 
 with panel_neutral:
     tab_neutral()
+
+with panel_backtest:
+    tab_backtest()
 
 with panel_live:
     tab_live_charts()
