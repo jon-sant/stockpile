@@ -7,6 +7,7 @@ the default ranking unchanged.
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from options_scanner import iv_scores
 from options_scanner.iv_scores import ScoreContext
@@ -201,3 +202,99 @@ def test_display_helpers():
     df = pd.DataFrame({"signal_kind": ["IV z", "IV z"]})
     assert iv_scores.active_kind(df) == "IV z"
     assert iv_scores.active_kind(pd.DataFrame()) == "IV+pp"
+
+
+def _composite_df():
+    return pd.DataFrame({
+        "iv": [0.30, 0.30],
+        "iv_fitted": [0.28, 0.28],
+        "iv_excess": [0.02, 0.02],
+        "delta": [0.3, 0.3],
+        "dte": [30, 30],
+        "ann_yield_pct": [10.0, 10.0],
+        "open_interest": [100, 400],
+        "volume": [10, 40],
+        "gamma": [0.01, 0.01],
+        "spot": [100.0, 100.0],
+        "strike": [100.0, 105.0],
+        "type": ["call", "call"],
+    })
+
+
+class _FakeHistoryConst:
+    """Returns fixed percentile values regardless of input, for pinning
+    the composite score's weighting arithmetic independent of the
+    percentile machinery's own (separately-tested) correctness."""
+
+    def percentile_for(self, ticker, excess, window_days=30,
+                       deltas=None, dtes=None):
+        return np.full(len(excess), 80.0)
+
+    def ann_delta_percentile_for(self, ticker, ann_yield_pct, deltas, dtes,
+                                 window_days=30):
+        return np.full(len(ann_yield_pct), 60.0)
+
+
+def test_liquidity_norm_min_max():
+    oi = pd.Series([100, 400])
+    vol = pd.Series([10, 40])
+    result = iv_scores._liquidity_norm(oi, vol)
+    assert result[0] == pytest.approx(0.0)
+    assert result[1] == pytest.approx(1.0)
+
+
+def test_liquidity_norm_degenerate_all_equal():
+    oi = pd.Series([100, 100, 100])
+    vol = pd.Series([10, 10, 10])
+    result = iv_scores._liquidity_norm(oi, vol)
+    assert np.allclose(result, 0.5)
+
+
+def test_composite_v2_exact_weighted_sum(monkeypatch):
+    df = _composite_df()
+    mask = np.ones(len(df), dtype=bool)
+    monkeypatch.setattr(
+        "options_scanner.compute.gex_summary.gex_alignment",
+        lambda df, spot: np.array([0.5, 0.9]),
+    )
+    ctx = ScoreContext(ticker="X", history=_FakeHistoryConst())
+    score, label = iv_scores.score(df, mask, ctx, ("composite_v2", frozenset()))
+    assert label == "Composite v2"
+
+    liq = iv_scores._liquidity_norm(df["open_interest"], df["volume"])
+    # Weights sum to 1.0 (0.40+0.25+0.20+0.15), so with every component
+    # present w_sum == 1 and no renormalization applies.
+    expected = 0.40 * 0.60 + 0.25 * 0.80 + 0.20 * liq + 0.15 * np.array([0.5, 0.9])
+    assert np.allclose(score, expected)
+
+
+def test_composite_v2_renormalizes_when_gex_missing():
+    # No gamma/spot/strike/type columns -> gex term is NaN for every row,
+    # and the remaining 3 weights (0.40+0.25+0.20=0.85) renormalize to
+    # sum 1.0 rather than the score shrinking by the missing 0.15.
+    df = pd.DataFrame({
+        "iv_excess": [0.02, 0.02],
+        "delta": [0.3, 0.3],
+        "dte": [30, 30],
+        "ann_yield_pct": [10.0, 10.0],
+        "open_interest": [100, 400],
+        "volume": [10, 40],
+    })
+    mask = np.ones(len(df), dtype=bool)
+    ctx = ScoreContext(ticker="X", history=_FakeHistoryConst())
+    score, _ = iv_scores.score(df, mask, ctx, ("composite_v2", frozenset()))
+
+    liq = iv_scores._liquidity_norm(df["open_interest"], df["volume"])
+    expected = (0.40 * 0.60 + 0.25 * 0.80 + 0.20 * liq) / 0.85
+    assert np.allclose(score, expected)
+
+
+def test_composite_v2_nan_when_no_history():
+    df = _composite_df()
+    mask = np.ones(len(df), dtype=bool)
+    ctx = ScoreContext(ticker="X", history=None)
+    score, _ = iv_scores.score(df, mask, ctx, ("composite_v2", frozenset()))
+    # ann/iv percentile terms are NaN without history; liquidity and gex
+    # (mocked implicitly via the real gex_summary call on this synthetic
+    # single-strike-pair chain) still renormalize the remaining weight.
+    assert not np.isnan(score).all()  # liquidity + gex alone still contribute

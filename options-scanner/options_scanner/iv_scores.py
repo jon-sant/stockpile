@@ -139,6 +139,71 @@ def _ann_delta_percentile(df: pd.DataFrame, fit_mask, ctx) -> tuple[np.ndarray, 
     return np.asarray(pct, dtype=float), "Ann/Δ %ile"
 
 
+_V2_WEIGHTS = {"ann_delta_pct": 0.40, "iv_pct": 0.25,
+              "liquidity": 0.20, "gex": 0.15}
+
+
+def _liquidity_norm(oi: pd.Series, volume: pd.Series) -> np.ndarray:
+    """Min-max normalized log1p(OI)+log1p(Vol) within the current
+    chain/basket, 0..1. All-equal input -> 0.5 (not NaN/inf) — a
+    degenerate/tiny chain shouldn't silently zero out the liquidity term."""
+    raw = (np.log1p(oi.to_numpy(dtype=float))
+           + np.log1p(volume.to_numpy(dtype=float)))
+    lo, hi = float(np.min(raw)), float(np.max(raw))
+    if hi - lo < 1e-9:
+        return np.full_like(raw, 0.5)
+    return (raw - lo) / (hi - lo)
+
+
+def _composite_v2(df: pd.DataFrame, fit_mask, ctx) -> tuple[np.ndarray, str]:
+    """Weighted blend of Ann%/Delta percentile, IV percentile, liquidity,
+    and GEX alignment — the historically-aware, cross-signal ranking
+    the feedback review asked for. Composes the existing
+    `_percentile`/`_ann_delta_percentile` scores (0-100 -> /100) and
+    `gex_summary.gex_alignment` (already 0-1) rather than duplicating
+    their logic, so this always matches what those scores show
+    standalone.
+
+    Note on call order: this runs inside `compute_iv_excess`, BEFORE
+    `fetch.py`'s post-hoc `iv_percentile`/`ann_delta_percentile`/
+    `gex_alignment` columns exist — so components are computed fresh
+    here from `ctx.history` and the raw chain columns, not read off
+    those columns.
+
+    Renormalizes weights per row over whichever components are actually
+    available/non-NaN, so a cold-start NaN in one term (e.g. no history
+    yet) doesn't poison the whole score — dropping a 0.15-weight term
+    entirely renormalizes the remaining weights to sum to 1.0 rather
+    than shrinking the score by 0.15.
+    """
+    n = len(df)
+    iv_pct_raw, _ = _percentile(df, fit_mask, ctx)
+    ann_pct_raw, _ = _ann_delta_percentile(df, fit_mask, ctx)
+    iv_pct = np.asarray(iv_pct_raw, dtype=float) / 100.0
+    ann_pct = np.asarray(ann_pct_raw, dtype=float) / 100.0
+
+    if {"open_interest", "volume"} <= set(df.columns):
+        liquidity = _liquidity_norm(df["open_interest"], df["volume"])
+    else:
+        liquidity = np.full(n, np.nan)
+
+    if n and {"gamma", "spot", "strike", "type"} <= set(df.columns):
+        from options_scanner.compute import gex_summary
+        gex = gex_summary.gex_alignment(df, float(df["spot"].iloc[0]))
+    else:
+        gex = np.full(n, np.nan)
+
+    comps = np.stack([ann_pct, iv_pct, liquidity, gex], axis=1)  # (n, 4)
+    weights = np.array([_V2_WEIGHTS["ann_delta_pct"], _V2_WEIGHTS["iv_pct"],
+                        _V2_WEIGHTS["liquidity"], _V2_WEIGHTS["gex"]])
+    avail = ~np.isnan(comps)
+    w_sum = (avail * weights).sum(axis=1)
+    weighted = np.where(avail, comps, 0.0) * weights
+    score = np.divide(weighted.sum(axis=1), w_sum,
+                      out=np.full(n, np.nan), where=w_sum > 0)
+    return score, "Composite v2"
+
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 REGISTRY: dict[str, dict] = {
@@ -184,6 +249,12 @@ REGISTRY: dict[str, dict] = {
         "label":    "Ann%/Delta Percentile — vs. own bucketed history",
         "enabled":  True,
     },
+    "composite_v2": {
+        "fn":       _composite_v2,
+        "defaults": {},
+        "label":    "Composite v2 — Ann/Δ + IV%ile + liquidity + GEX",
+        "enabled":  True,
+    },
 }
 
 # Default: raw IV+pp — reproduces current ranking exactly.
@@ -201,6 +272,7 @@ SCORE_DISPLAY: dict[str, tuple[float, str]] = {
     "VRP":     (1.0,   "%.2f"),
     "IV %ile": (1.0,   "%.0f"),
     "Ann/Δ %ile": (1.0, "%.0f"),
+    "Composite v2": (100.0, "%.1f"),
 }
 
 
