@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -33,7 +33,10 @@ _DEFAULT_DB = Path(__file__).resolve().parent.parent / "cache" / "iv_history.db"
 _MIN_HISTORY = 30          # pooled observations required before percentiles mean anything
 _MIN_HISTORY_BUCKETED = 15  # lower bar per delta×DTE bucket — same-bucket obs are scarcer
 _REQUIRED_COLS = ("type", "strike", "expiration", "dte", "iv_excess")
-_NEW_COLS = ("mid", "delta", "ann_yield_pct")  # added post-launch; nullable for old rows
+_NEW_COLS = ("mid", "delta", "ann_yield_pct", "iv")  # added post-launch; nullable for old rows
+
+_IV_RANK_WINDOW_DAYS = 365  # cap on how far back IV Rank looks
+_IV_RANK_MIN_DAYS = 2       # need >=1 prior day + today to form a min/max range
 
 _DELTA_STEP = 0.05
 _DTE_BANDS: tuple[tuple[int, int | None], ...] = ((0, 14), (15, 45), (46, 90), (91, None))
@@ -110,7 +113,8 @@ def record_scan(ticker: str, df: pd.DataFrame,
     rows = [
         (ticker, scan_date, str(r["type"]), float(r["strike"]),
          str(r["expiration"]), int(r["dte"]), float(r["iv_excess"]),
-         _opt("mid", r), _opt("delta", r), _opt("ann_yield_pct", r))
+         _opt("mid", r), _opt("delta", r), _opt("ann_yield_pct", r),
+         _opt("iv", r))
         for _, r in df.iterrows()
         if pd.notna(r["iv_excess"])
     ]
@@ -125,8 +129,8 @@ def record_scan(ticker: str, df: pd.DataFrame,
             conn.executemany(
                 "INSERT INTO iv_history "
                 "(ticker, scan_date, type, strike, expiration, dte, iv_excess, "
-                " mid, delta, ann_yield_pct) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " mid, delta, ann_yield_pct, iv) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
     except sqlite3.Error:
@@ -267,3 +271,70 @@ def ann_delta_percentile_for(ticker: str, ann_yield_pct, deltas, dtes,
     return _bucketed_percentile(ticker, ann_yield_pct, deltas, dtes,
                                 window_days, "ann_yield_pct",
                                 transform=_yield_per_delta)
+
+
+def _daily_representative_iv(ticker: str, window_days: int) -> pd.DataFrame:
+    """One row per scan_date: that day's median IV across every recorded
+    contract for `ticker` — a simple, robust stand-in for "the" ticker's
+    implied-vol level that day. Median (not a single ATM contract) so a
+    strike/expiration rolling out of the chain between scans can't create
+    a gap or a discontinuity in the series. Rows with NULL `iv` (pre-PR
+    legacy rows) are excluded. Empty (right columns, zero rows) on no
+    history or a storage error, mirroring this module's fail-open style."""
+    cutoff = (date.today() - timedelta(days=window_days)).isoformat()
+    cols = ["scan_date", "iv"]
+    try:
+        with _connect() as conn:
+            df = pd.read_sql_query(
+                "SELECT scan_date, iv FROM iv_history "
+                "WHERE ticker = ? AND scan_date >= ? AND iv IS NOT NULL",
+                conn, params=(ticker.upper(), cutoff),
+            )
+    except sqlite3.Error:
+        return pd.DataFrame(columns=cols)
+    if df.empty:
+        return df
+    return df.groupby("scan_date", as_index=False)["iv"].median()
+
+
+def iv_rank_for(ticker: str, today_iv: float | None,
+                 window_days: int = _IV_RANK_WINDOW_DAYS
+                 ) -> tuple[float | None, date | None, date | None]:
+    """0-100 IV Rank: where `today_iv` (the ticker's representative IV
+    for today — see _daily_representative_iv) sits between the min and
+    max representative IV seen for `ticker` over the trailing
+    `window_days` (default 365), INCLUDING today.
+
+    Rank = 100 * (today_iv - min) / (max - min), clamped to [0, 100].
+
+    Returns (rank, earliest_date_used, latest_date_used). The date range
+    reflects whatever history actually exists — it can be much shorter
+    than `window_days` when a ticker has only recently started being
+    scanned, which is by design (a rank computed over 3 weeks of history
+    is still a real rank, just not a 365-day one — the caller surfaces
+    the date range so that distinction isn't hidden).
+
+    Returns (None, None, None) when there's no usable history at all,
+    and (None, only_date, only_date) when today would be the *only*
+    data point (a min/max range of a single value isn't a rank).
+    """
+    if today_iv is None or not (today_iv == today_iv):  # None or NaN
+        return None, None, None
+    daily = _daily_representative_iv(ticker, window_days)
+    today = date.today()
+    if daily.empty:
+        return None, today, today
+    prior_dates = [datetime.strptime(d, "%Y-%m-%d").date()
+                   for d in daily["scan_date"]]
+    all_dates = prior_dates + [today]
+    d_from, d_to = min(all_dates), max(all_dates)
+    if len(set(all_dates)) < _IV_RANK_MIN_DAYS:
+        return None, d_from, d_to
+
+    values = list(daily["iv"]) + [today_iv]
+    lo, hi = min(values), max(values)
+    if hi - lo < 1e-9:
+        return None, d_from, d_to  # no meaningful spread yet
+
+    rank = 100.0 * (today_iv - lo) / (hi - lo)
+    return max(0.0, min(100.0, rank)), d_from, d_to

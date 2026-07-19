@@ -253,3 +253,128 @@ def test_record_and_read_round_trip_includes_new_columns():
     assert row0["mid"] == pytest.approx(1.0)
     assert row0["delta"] == pytest.approx(0.3)
     assert row0["ann_yield_pct"] == pytest.approx(10.0)
+
+
+# ── IV Rank ──────────────────────────────────────────────────────────────────
+
+def _iv_snapshot(n: int, iv: float) -> pd.DataFrame:
+    return pd.DataFrame({
+        "type": ["call"] * n,
+        "strike": [100.0 + i for i in range(n)],
+        "expiration": ["2026-06-19"] * n,
+        "dte": [30] * n,
+        "iv_excess": [0.001 * i for i in range(n)],
+        "iv": [iv] * n,
+    })
+
+
+def test_iv_rank_none_when_no_history_at_all():
+    rank, d_from, d_to = iv_history.iv_rank_for("AMD", 0.30)
+    assert rank is None
+    assert d_from == d_to == date.today()
+
+
+def test_iv_rank_none_with_only_one_day_of_data():
+    # Recording *today's* iv into the DB doesn't help iv_rank_for on its
+    # own — it needs a PRIOR day plus today's live value to form a range.
+    iv_history.record_scan("AMD", _iv_snapshot(3, iv=0.30), scan_day=date.today())
+    rank, d_from, d_to = iv_history.iv_rank_for("AMD", 0.30)
+    assert rank is None
+    assert d_from == d_to == date.today()
+
+
+def test_iv_rank_at_extremes():
+    today = date.today()
+    iv_history.record_scan("AMD", _iv_snapshot(3, iv=0.20),
+                           scan_day=today - timedelta(days=10))
+    iv_history.record_scan("AMD", _iv_snapshot(3, iv=0.40),
+                           scan_day=today - timedelta(days=5))
+    # today's IV at the historical max -> rank 100
+    rank_hi, d_from, d_to = iv_history.iv_rank_for("AMD", 0.40)
+    assert rank_hi == pytest.approx(100.0)
+    assert d_from == today - timedelta(days=10)
+    assert d_to == today
+    # today's IV at the historical min -> rank 0
+    rank_lo, _, _ = iv_history.iv_rank_for("AMD", 0.20)
+    assert rank_lo == pytest.approx(0.0)
+
+
+def test_iv_rank_midpoint():
+    today = date.today()
+    iv_history.record_scan("AMD", _iv_snapshot(3, iv=0.20),
+                           scan_day=today - timedelta(days=10))
+    iv_history.record_scan("AMD", _iv_snapshot(3, iv=0.40),
+                           scan_day=today - timedelta(days=5))
+    rank, _, _ = iv_history.iv_rank_for("AMD", 0.30)
+    assert rank == pytest.approx(50.0)
+
+
+def test_iv_rank_clamped_when_today_is_new_extreme():
+    today = date.today()
+    iv_history.record_scan("AMD", _iv_snapshot(3, iv=0.20),
+                           scan_day=today - timedelta(days=10))
+    iv_history.record_scan("AMD", _iv_snapshot(3, iv=0.40),
+                           scan_day=today - timedelta(days=5))
+    rank, _, _ = iv_history.iv_rank_for("AMD", 0.90)  # new all-time high
+    assert rank == pytest.approx(100.0)
+    rank_lo, _, _ = iv_history.iv_rank_for("AMD", 0.01)  # new all-time low
+    assert rank_lo == pytest.approx(0.0)
+
+
+def test_iv_rank_none_when_no_spread():
+    today = date.today()
+    iv_history.record_scan("AMD", _iv_snapshot(3, iv=0.30),
+                           scan_day=today - timedelta(days=5))
+    rank, d_from, d_to = iv_history.iv_rank_for("AMD", 0.30)
+    assert rank is None  # every observed value is identical, no range
+    assert d_from == today - timedelta(days=5)
+    assert d_to == today
+
+
+def test_iv_rank_none_for_nan_or_none_today_iv():
+    today = date.today()
+    iv_history.record_scan("AMD", _iv_snapshot(3, iv=0.30),
+                           scan_day=today - timedelta(days=5))
+    assert iv_history.iv_rank_for("AMD", float("nan")) == (None, None, None)
+    assert iv_history.iv_rank_for("AMD", None) == (None, None, None)
+
+
+def test_iv_rank_uses_median_across_contracts_same_day():
+    today = date.today()
+    mixed = pd.DataFrame({
+        "type": ["call"] * 3,
+        "strike": [100.0, 105.0, 110.0],
+        "expiration": ["2026-06-19"] * 3,
+        "dte": [30] * 3,
+        "iv_excess": [0.0, 0.001, 0.002],
+        "iv": [0.10, 0.20, 0.90],  # median 0.20, mean ~0.4 — must use median
+    })
+    iv_history.record_scan("AMD", mixed, scan_day=today - timedelta(days=10))
+    iv_history.record_scan("AMD", _iv_snapshot(3, iv=0.40),
+                           scan_day=today - timedelta(days=5))
+    # Pool is [0.20 (day1 median, NOT the ~0.4 mean), 0.40 (day2)] + today.
+    # If the mean were used instead, day1 would contribute ~0.4 too, and
+    # this query would land at a different rank (or None, zero spread).
+    rank, _, _ = iv_history.iv_rank_for("AMD", 0.30)
+    assert rank == pytest.approx(50.0)
+
+
+def test_iv_rank_window_limits_lookback():
+    today = date.today()
+    iv_history.record_scan("AMD", _iv_snapshot(3, iv=0.05),
+                           scan_day=today - timedelta(days=400))  # outside window
+    iv_history.record_scan("AMD", _iv_snapshot(3, iv=0.15),
+                           scan_day=today - timedelta(days=200))  # inside window
+    iv_history.record_scan("AMD", _iv_snapshot(3, iv=0.25),
+                           scan_day=today - timedelta(days=5))   # inside window
+    rank, d_from, _ = iv_history.iv_rank_for("AMD", 0.40, window_days=365)  # new high
+    assert d_from == today - timedelta(days=200)  # earliest IN-WINDOW date, not 400
+    assert rank == pytest.approx(100.0)
+
+
+def test_iv_rank_ignores_rows_with_null_iv():
+    # Legacy rows (recorded before this column existed) have NULL iv.
+    iv_history.record_scan("AMD", _snapshot_legacy(3), scan_day=date.today() - timedelta(days=5))
+    rank, d_from, d_to = iv_history.iv_rank_for("AMD", 0.30)
+    assert rank is None  # no usable prior history -> same as no history
+    assert d_from == d_to == date.today()

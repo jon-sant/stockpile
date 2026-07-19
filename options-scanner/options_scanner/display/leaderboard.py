@@ -691,6 +691,27 @@ def _prem_pct_em(board: pd.DataFrame) -> pd.Series:
     return (board["mid"] / expected_move.replace(0, float("nan"))).round(2)
 
 
+def _iv_rank_help(board: pd.DataFrame) -> str:
+    """Column-header tooltip for IV Rank. Unlike scan_results.show_df,
+    this table spans multiple tickers at once, each with its own
+    evaluated date range — Streamlit's dataframe has no per-cell
+    tooltip, so the header shows the methodology plus the widest span
+    actually covered across the tickers in view, rather than a false
+    single exact range."""
+    base = ("0-100: where today's IV sits between each ticker's own "
+            "min and max scanned IV, over up to 365 days of that "
+            "ticker's own scan history (this app's own accumulated "
+            "scans — no external historical-IV provider exists).")
+    if "iv_rank_date_from" not in board.columns:
+        return base
+    froms = [d for d in board["iv_rank_date_from"] if pd.notna(d)]
+    tos = [d for d in board["iv_rank_date_to"] if pd.notna(d)]
+    if not froms or not tos:
+        return base + " Blank until a ticker has ≥2 distinct scan days."
+    return (f"{base} Range varies per ticker — earliest across tickers "
+            f"shown: {min(froms)}, latest: {max(tos)}.")
+
+
 def _render_table(board: pd.DataFrame, side: str, min_vol: int,
                   investigate: bool = False, min_oi: int = 25, top_n: int = 5,
                   ticker_dfs: dict | None = None,
@@ -753,6 +774,8 @@ def _render_table(board: pd.DataFrame, side: str, min_vol: int,
                   if "last" in board.columns
                   else pd.Series([float("nan")] * len(board), index=board.index)),
         "IV+pp": (board["iv_excess"] * 100).round(1),
+        "IV Rank": (board["iv_rank"].round(0) if "iv_rank" in board.columns
+                    else pd.Series([float("nan")] * len(board), index=board.index)),
     }
     if kind != "IV+pp":
         mult, _ = iv_scores.display_for(kind)
@@ -795,6 +818,8 @@ def _render_table(board: pd.DataFrame, side: str, min_vol: int,
         "Last":  st.column_config.NumberColumn("Last", format="$%.2f", width=70),
         "IV+pp": st.column_config.NumberColumn("IV+pp", format="%+.1f pp",
                                                width=80),
+        "IV Rank": st.column_config.NumberColumn(
+            "IV Rank", format="%.0f", width=75, help=_iv_rank_help(board)),
         "★": st.column_config.TextColumn(
             "★", width=70,
             help="Star rating: percentile rank of the active ranking "
