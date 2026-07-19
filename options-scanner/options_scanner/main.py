@@ -243,7 +243,12 @@ def _scan_one(ticker: str, args, opt_type_fetch: str, mode: str,
     df["hv_20"] = hv
     df["vr_ratio"] = (df["iv"] / hv) if (np.isfinite(hv) and hv > 0) \
         else float("nan")
-    iv_history.record_scan(ticker, df)
+    # earnings_dates is fetch_earnings_dates()'s 0-or-1-element nearest-
+    # future list — same convention as fetch.py's _enrich(). Without this,
+    # CLI-scanned rows would carry spot but no earnings context for a
+    # later background Monte Carlo pass.
+    earnings_next_date = earnings_dates[0] if earnings_dates else None
+    iv_history.record_scan(ticker, df, earnings_next_date=earnings_next_date)
 
     spot = float(df["spot"].iloc[0])
 
