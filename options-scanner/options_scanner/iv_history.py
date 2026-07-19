@@ -115,6 +115,29 @@ def _pool(ticker: str, window_days: int) -> np.ndarray:
     return np.asarray(vals, dtype=float)
 
 
+def history_for(ticker: str, window_days: int = 30) -> pd.DataFrame:
+    """Raw trailing-window scan-history rows for `ticker`.
+
+    Lets the UI/CLI show what's actually been recorded — the only other
+    reader of this store (`percentile_for`) collapses it to one number
+    per row. Empty (right columns, zero rows) if nothing's recorded yet
+    or the DB is unreachable, mirroring `_pool()`'s fail-open behavior.
+    """
+    cutoff = (date.today() - timedelta(days=window_days)).isoformat()
+    cols = ["scan_date", "type", "strike", "expiration", "dte", "iv_excess"]
+    try:
+        with _connect() as conn:
+            df = pd.read_sql_query(
+                "SELECT scan_date, type, strike, expiration, dte, iv_excess "
+                "FROM iv_history WHERE ticker = ? AND scan_date >= ? "
+                "ORDER BY scan_date, type, strike",
+                conn, params=(ticker.upper(), cutoff),
+            )
+    except sqlite3.Error:
+        return pd.DataFrame(columns=cols)
+    return df
+
+
 def percentile_for(ticker: str, iv_excess, window_days: int = 30) -> np.ndarray:
     """Percentile rank (0–100) of each iv_excess value within the ticker's
     trailing-window pool. Returns NaN for every row during cold start

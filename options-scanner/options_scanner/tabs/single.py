@@ -36,7 +36,7 @@ from options_scanner.display.spot_meta import (
 )
 from options_scanner.fetch import fetch_and_enrich
 from options_scanner.format import fmt_strike
-from options_scanner import iv_algorithms, iv_scores
+from options_scanner import iv_algorithms, iv_history, iv_scores
 from options_scanner.iv_filters import DEFAULT_CONFIG as FILTER_DEFAULT, SurfaceFilterConfig
 from options_scanner.mc_ui import position_from_chain_row, render_mc_panel
 from options_scanner.recent_scans import build_label, load as load_recent, save as save_recent
@@ -687,6 +687,34 @@ def tab_single() -> None:
 
     show_surface_diagnostics(df_fit_full, res.get("surface_filters"),
                              res.get("algo_config"))
+
+    with st.expander(f"Scan history — {ticker_r}"):
+        hist = iv_history.history_for(ticker_r)
+        if hist.empty:
+            st.caption(
+                f"No recorded scan history yet for {ticker_r} — it "
+                "accumulates one snapshot per day this ticker is scanned. "
+                "The percentile score also needs 30+ pooled observations "
+                "before it stops returning blank."
+            )
+        else:
+            st.caption(
+                f"{len(hist)} contract snapshot(s) across "
+                f"{hist['scan_date'].nunique()} scan day(s), trailing 30 days."
+            )
+            daily = hist.groupby("scan_date")["iv_excess"].mean() * 100
+            st.line_chart(daily, y_label="Mean IV+pp (%)")
+            _disp = hist.copy()
+            _disp["strike"] = _disp["strike"].apply(fmt_strike)
+            _disp["iv_excess"] = (_disp["iv_excess"] * 100).round(1)
+            st.dataframe(
+                _disp.rename(columns={
+                    "scan_date": "Scan Date", "type": "Type",
+                    "strike": "Strike", "expiration": "Expiration",
+                    "dte": "DTE", "iv_excess": "IV+pp",
+                }),
+                hide_index=True, width="stretch",
+            )
 
     chosen_exp = st.session_state.get("s_chart_exp")
     if chosen_exp:
