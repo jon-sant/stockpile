@@ -19,7 +19,7 @@ import pandas as pd
 import streamlit as st
 
 from options_scanner import iv_scores
-from options_scanner.format import EARNINGS_WARN_LEGEND, fmt_strike
+from options_scanner.format import EARNINGS_WARN_LEGEND, fmt_stars, fmt_strike, stars_for
 from options_scanner.ui_theme import empty_state
 
 from options_scanner.display.chain_styling import (
@@ -102,6 +102,7 @@ def show_df(sub: pd.DataFrame, roll_close_cost: float | None = None,
     if kind != "IV+pp":
         mult, _ = iv_scores.display_for(kind)
         cols[kind] = (sub["signal_score"] * mult).round(2)
+    cols["★"] = [fmt_stars(s) for s in stars_for(sub["signal_score"])]
     cols.update({
         "Delta":  sub["delta"].round(2),
         "Ann%":   sub["ann_yield_pct"].round(1),
@@ -160,6 +161,12 @@ def show_df(sub: pd.DataFrame, roll_close_cost: float | None = None,
         "IV+pp": st.column_config.NumberColumn("IV+pp", format="%+.1f pp",
                                                width=75,
                                                help=ivpp_help_for(buy, opt_type)),
+        "★": st.column_config.TextColumn(
+            "★", width=70,
+            help="Star rating: percentile rank of the active ranking "
+                 "score within this table, mapped to 0-5 stars at "
+                 "half-star resolution. Most meaningful when Composite "
+                 "v2 is the active score."),
         "Delta": st.column_config.NumberColumn("Delta", format="%.2f",
                                                width=60),
         "Ann%":  st.column_config.NumberColumn("Ann%", format="%.1f%%",

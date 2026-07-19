@@ -20,7 +20,7 @@ import pandas as pd
 import streamlit as st
 
 from options_scanner import iv_scores
-from options_scanner.format import EARNINGS_WARN_LEGEND, fmt_strike
+from options_scanner.format import EARNINGS_WARN_LEGEND, fmt_stars, fmt_strike, stars_for
 from options_scanner.display.scan_stamp import stamp_caption
 
 
@@ -757,6 +757,7 @@ def _render_table(board: pd.DataFrame, side: str, min_vol: int,
     if kind != "IV+pp":
         mult, _ = iv_scores.display_for(kind)
         cols[kind] = (board["signal_score"] * mult).round(2)
+    cols["★"] = [fmt_stars(s) for s in stars_for(board["signal_score"])]
     cols.update({
         "Delta": board["delta"].round(2),
         "Ann%":  board["ann_yield_pct"].round(1),
@@ -794,6 +795,12 @@ def _render_table(board: pd.DataFrame, side: str, min_vol: int,
         "Last":  st.column_config.NumberColumn("Last", format="$%.2f", width=70),
         "IV+pp": st.column_config.NumberColumn("IV+pp", format="%+.1f pp",
                                                width=80),
+        "★": st.column_config.TextColumn(
+            "★", width=70,
+            help="Star rating: percentile rank of the active ranking "
+                 "score within this table, mapped to 0-5 stars at "
+                 "half-star resolution. Most meaningful when Composite "
+                 "v2 is the active score."),
         "Delta": st.column_config.NumberColumn("Delta", format="%.2f",
                                                width=60),
         "Ann%":  st.column_config.NumberColumn("Ann%", format="%.1f%%",
