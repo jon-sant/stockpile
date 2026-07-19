@@ -389,6 +389,8 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
             # blank rather than carry over a stale filter.
             st.session_state[f"{k}_min_ivpp"] = None
             st.session_state[f"{k}_min_ann"]  = None
+            st.session_state[f"{k}_min_percentile"] = None
+            st.session_state[f"{k}_min_ann_delta_percentile"] = None
             st.session_state[f"{k}_delta"]    = (_dmin, _dmax)
             st.session_state[f"{k}_top"]      = max(1, int(entry.get("top_n", 5)))
             st.session_state[f"{k}_opt_type"] = entry.get("option_type", "Calls")
@@ -538,6 +540,26 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
     with pc8:
         port_top = st.number_input("Top N per ticker", value=5, min_value=1,
                                    key=f"{k}_top")
+
+    pp1, pp2, _pp3 = st.columns([1, 1, 4])
+    with pp1:
+        port_min_percentile = st.number_input(
+            "Min IV %ile", value=None, step=5.0, format="%.0f",
+            min_value=0.0, max_value=100.0,
+            placeholder="none", key=f"{k}_min_percentile",
+            help="Floor on IV %ile — how rich today's IV+pp is vs. this "
+                 "ticker's own delta/DTE-bucketed history (0-100). "
+                 "Blank = no filter.",
+        )
+    with pp2:
+        port_min_ann_delta_percentile = st.number_input(
+            "Min Ann/Δ %ile", value=None, step=5.0, format="%.0f",
+            min_value=0.0, max_value=100.0,
+            placeholder="none", key=f"{k}_min_ann_delta_percentile",
+            help="Floor on Ann%/Delta %ile — how rich today's yield-per-"
+                 "delta is vs. this ticker's own bucketed history (0-100). "
+                 "Blank = no filter.",
+        )
 
     # ── Controls row 2: scan semantics ───────────────────────────────────────
     # Watchlist mode is best-option only over a typed basket, so Scan mode
@@ -808,7 +830,9 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
                            delta_range=port_delta_range, buy=stored_buy,
                            allow_investigate=_allow_investigate,
                            provider=_lb_provider,
-                           min_ivpp=port_min_ivpp, min_ann=port_min_ann)
+                           min_ivpp=port_min_ivpp, min_ann=port_min_ann,
+                           min_percentile=port_min_percentile,
+                           min_ann_delta_percentile=port_min_ann_delta_percentile)
 
     for res in results:
         pos    = res["position"]
@@ -955,7 +979,9 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
             show_scan_results(df_filt, stored_side, stored_buy, _table_roll_close,
                                int(port_min_oi), int(port_top),
                                int(port_min_vol),
-                               min_ivpp=port_min_ivpp, min_ann=port_min_ann)
+                               min_ivpp=port_min_ivpp, min_ann=port_min_ann,
+                               min_percentile=port_min_percentile,
+                               min_ann_delta_percentile=port_min_ann_delta_percentile)
 
     # Portfolio HTML download
     from options_scanner.report import render_portfolio_html

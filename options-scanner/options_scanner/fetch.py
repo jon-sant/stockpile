@@ -70,6 +70,23 @@ def _enrich(df: pd.DataFrame, ticker: str,
     else:
         df["gex_alignment"] = float("nan")
 
+    # Percentile-family columns, computed unconditionally (regardless of
+    # which score is active) — iv_scores.py's registry only ever
+    # materializes ONE score as signal_score, but filtering (min_percentile
+    # below) and PR6's composite score both need these present as plain
+    # columns no matter what's driving the ranking.
+    if not df.empty and {"delta", "dte"} <= set(df.columns):
+        df["iv_percentile"] = iv_history.percentile_for(
+            ticker, df["iv_excess"], deltas=df["delta"], dtes=df["dte"])
+        if "ann_yield_pct" in df.columns:
+            df["ann_delta_percentile"] = iv_history.ann_delta_percentile_for(
+                ticker, df["ann_yield_pct"], df["delta"], df["dte"])
+        else:
+            df["ann_delta_percentile"] = float("nan")
+    else:
+        df["iv_percentile"] = float("nan")
+        df["ann_delta_percentile"] = float("nan")
+
     iv_history.record_scan(ticker, df)
     return df, earnings
 
