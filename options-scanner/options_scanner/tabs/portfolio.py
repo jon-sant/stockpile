@@ -30,8 +30,9 @@ import streamlit as st
 
 from stocks_shared.yahoo import RateLimitError
 
+from options_scanner.compute import capital_allocator
 from options_scanner.display.iv_chart import show_iv_chart
-from options_scanner.display.leaderboard import render_leaderboard
+from options_scanner.display.leaderboard import build_leaderboard, render_leaderboard
 from options_scanner.display.portfolio_action_card import render_portfolio_action_card
 from options_scanner.display.scan_results import show_scan_results
 from options_scanner.display.spot_meta import (
@@ -833,6 +834,82 @@ def _render_scan_tab(is_watchlist: bool, k: str) -> None:
                            min_ivpp=port_min_ivpp, min_ann=port_min_ann,
                            min_percentile=port_min_percentile,
                            min_ann_delta_percentile=port_min_ann_delta_percentile)
+
+        with st.expander("Capital Allocator", expanded=False):
+            st.caption(
+                "Greedy waterfill across the scanned basket, ranked by "
+                "expected P&L per dollar of worst-5%-tail risk (a quick "
+                "per-candidate Monte Carlo run). Sell-side only — CSP / "
+                "covered-call collateral sizing."
+            )
+            if stored_buy:
+                st.info("Capital allocation is sell-side only.")
+            else:
+                _budget = st.number_input(
+                    "Capital to allocate ($)", value=10000.0, min_value=0.0,
+                    step=1000.0, key=f"{k}_alloc_budget",
+                )
+                _run_alloc = st.button("Allocate", key=f"{k}_alloc_run")
+                if _run_alloc and _budget > 0:
+                    _alloc_sides = ([stored_side] if stored_side in ("call", "put")
+                                    else ["call", "put"])
+                    _alloc_boards = [
+                        build_leaderboard(
+                            results, s, int(port_min_oi), int(port_top),
+                            int(port_min_vol), delta_range=port_delta_range,
+                            buy=False, min_ivpp=port_min_ivpp,
+                            min_ann=port_min_ann,
+                            min_percentile=port_min_percentile,
+                            min_ann_delta_percentile=port_min_ann_delta_percentile,
+                        )
+                        for s in _alloc_sides
+                    ]
+                    _alloc_boards = [b for b in _alloc_boards if not b.empty]
+                    _alloc_board = (pd.concat(_alloc_boards, ignore_index=True)
+                                    if _alloc_boards else pd.DataFrame())
+                    if _alloc_board.empty:
+                        st.info("No candidates to allocate against — loosen "
+                                "the scan filters above.")
+                    else:
+                        with st.spinner("Running per-candidate Monte Carlo…"):
+                            _candidates = capital_allocator.candidates_from_board(
+                                _alloc_board)
+                        _alloc = capital_allocator.allocate_capital(
+                            _candidates, float(_budget))
+                        if _alloc.empty:
+                            st.info("No candidates cleared a positive "
+                                    "risk-adjusted edge for this budget.")
+                        else:
+                            _disp = _alloc.rename(columns={
+                                "ticker": "Ticker", "strike": "Strike",
+                                "expiration": "Expiration", "opt_type": "Type",
+                                "contracts": "Contracts", "collateral": "Collateral",
+                                "edge_score": "Edge", "expected_pnl": "Exp P&L",
+                            })
+                            _disp["P(profit)"] = _alloc["prob_profit"] * 100.0
+                            _disp = _disp.drop(columns=["prob_profit"])
+                            st.dataframe(
+                                _disp, hide_index=True, width="stretch",
+                                column_config={
+                                    "Strike": st.column_config.NumberColumn(
+                                        "Strike", format="$%.2f"),
+                                    "Collateral": st.column_config.NumberColumn(
+                                        "Collateral", format="$%.2f"),
+                                    "Edge": st.column_config.NumberColumn(
+                                        "Edge", format="%.3f",
+                                        help="Expected P&L / |worst-5% tail "
+                                             "P&L| — higher is better."),
+                                    "Exp P&L": st.column_config.NumberColumn(
+                                        "Exp P&L", format="$%.2f"),
+                                    "P(profit)": st.column_config.NumberColumn(
+                                        "P(profit)", format="%.1f%%"),
+                                },
+                            )
+                            st.caption(
+                                f"Allocated ${_alloc['collateral'].sum():,.2f} "
+                                f"of ${_budget:,.2f} across {len(_alloc)} "
+                                "position(s)."
+                            )
 
     for res in results:
         pos    = res["position"]
