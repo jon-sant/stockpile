@@ -50,6 +50,24 @@ def _prem_pct_em(sub: pd.DataFrame) -> pd.Series:
     return (sub["mid"] / expected_move.replace(0, float("nan"))).round(2)
 
 
+def _iv_rank_help(sub: pd.DataFrame) -> str:
+    """Column-header tooltip for IV Rank — this table is always one
+    ticker (Single Ticker tab, or one Portfolio position at a time), so
+    the exact date range actually evaluated can be shown, not just a
+    generic description."""
+    base = ("0-100: where today's IV sits between this ticker's own "
+            "min and max scanned IV, over up to 365 days of scan "
+            "history (this app's own accumulated scans — no external "
+            "historical-IV provider exists).")
+    if "iv_rank_date_from" not in sub.columns or sub.empty:
+        return base
+    d_from = sub["iv_rank_date_from"].iloc[0]
+    d_to = sub["iv_rank_date_to"].iloc[0]
+    if pd.isna(d_from) or pd.isna(d_to):
+        return base + " Blank until at least 2 distinct scan days exist."
+    return f"{base} Range evaluated: {d_from} to {d_to}."
+
+
 def show_df(sub: pd.DataFrame, roll_close_cost: float | None = None,
             min_oi: int = 0, min_vol: int = 0,
             buy: bool = False, opt_type: str = "option") -> None:
@@ -97,6 +115,8 @@ def show_df(sub: pd.DataFrame, roll_close_cost: float | None = None,
         "Last":   sub["last"].where(sub["last"] > 0) if "last" in sub.columns else pd.Series([float("nan")] * len(sub), index=sub.index),
         "IV%":    (sub["iv"] * 100).round(1),
         "IV+pp":  (sub["iv_excess"] * 100).round(1),
+        "IV Rank": (sub["iv_rank"].round(0) if "iv_rank" in sub.columns
+                    else pd.Series([float("nan")] * len(sub), index=sub.index)),
     }
     # When a non-default score drives the ranking, show it alongside IV+pp.
     if kind != "IV+pp":
@@ -161,6 +181,9 @@ def show_df(sub: pd.DataFrame, roll_close_cost: float | None = None,
         "IV+pp": st.column_config.NumberColumn("IV+pp", format="%+.1f pp",
                                                width=75,
                                                help=ivpp_help_for(buy, opt_type)),
+        "IV Rank": st.column_config.NumberColumn(
+            "IV Rank", format="%.0f", width=75,
+            help=_iv_rank_help(sub)),
         "★": st.column_config.TextColumn(
             "★", width=70,
             help="Star rating: percentile rank of the active ranking "

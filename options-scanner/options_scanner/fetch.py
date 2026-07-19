@@ -89,6 +89,23 @@ def _enrich(df: pd.DataFrame, ticker: str,
         df["iv_percentile"] = float("nan")
         df["ann_delta_percentile"] = float("nan")
 
+    # IV Rank: where today's representative IV (median across the whole
+    # scanned chain) sits vs. this ticker's own trailing scan history
+    # (up to 365 days — see iv_history.iv_rank_for). Ticker-level, not
+    # per-contract, so every row gets the same value; the date range
+    # actually used is carried alongside for the display layer's tooltip
+    # (history can be much shorter than 365 days for a newly-scanned
+    # ticker, and the UI should say so rather than imply a full year).
+    if not df.empty and "iv" in df.columns:
+        _today_iv_s = df["iv"].dropna()
+        _today_iv = float(_today_iv_s.median()) if not _today_iv_s.empty else float("nan")
+    else:
+        _today_iv = float("nan")
+    _iv_rank, _iv_rank_from, _iv_rank_to = iv_history.iv_rank_for(ticker, _today_iv)
+    df["iv_rank"] = _iv_rank if _iv_rank is not None else float("nan")
+    df["iv_rank_date_from"] = _iv_rank_from.isoformat() if _iv_rank_from else None
+    df["iv_rank_date_to"] = _iv_rank_to.isoformat() if _iv_rank_to else None
+
     iv_history.record_scan(ticker, df)
     return df, earnings
 
