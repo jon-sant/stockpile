@@ -14,6 +14,7 @@ to the wall); net negative = "amplifying" regime (price runs).
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 # U.S. equity/ETF options carry 100 shares per contract. The 0.01 scales
@@ -139,3 +140,41 @@ def compute_gex_summary(df: pd.DataFrame, spot: float) -> dict | None:
         "top_wall": top_wall,
         "top_amp": top_amp,
     }
+
+
+_AMP_PENALTY_WEIGHT = 0.5  # tunable starting default, not load-bearing
+
+
+def gex_alignment(df: pd.DataFrame, spot: float) -> np.ndarray:
+    """Per-row [0,1] GEX alignment score, one value per row of `df`.
+
+    High near the chain's strongest pinning wall (price tends to revert
+    there), discounted near the strongest amp zone (price tends to run
+    away from there). Turns `compute_gex_summary`'s per-ticker wall/amp
+    strikes into a per-contract number a composite score can blend in.
+
+    Returns NaN (not 0) for every row when GEX can't be computed at all
+    (no gamma column, empty chain, or a degenerate all-zero-GEX chain) —
+    so a downstream composite can skip the term entirely via
+    renormalization instead of silently treating "unknown" as "bad".
+    """
+    n = len(df)
+    per_strike = per_strike_gex(df, spot)
+    if per_strike.empty or per_strike["gex"].abs().sum() == 0:
+        return np.full(n, np.nan)
+
+    walls = per_strike[per_strike["gex"] > 0]
+    amps = per_strike[per_strike["gex"] < 0]
+    top_wall = (float(walls.loc[walls["gex"].idxmax(), "strike"])
+                if not walls.empty else None)
+    top_amp = (float(amps.loc[amps["gex"].idxmin(), "strike"])
+               if not amps.empty else None)
+
+    strikes = df["strike"].to_numpy(dtype=float)
+    norm = max(float(spot), 1e-9)
+
+    wall_term = (1.0 / (1.0 + np.abs(strikes - top_wall) / norm)
+                if top_wall is not None else np.zeros(n))
+    amp_term = (1.0 / (1.0 + np.abs(strikes - top_amp) / norm)
+               if top_amp is not None else np.zeros(n))
+    return np.clip(wall_term - _AMP_PENALTY_WEIGHT * amp_term, 0.0, 1.0)

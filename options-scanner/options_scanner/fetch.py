@@ -64,6 +64,12 @@ def _enrich(df: pd.DataFrame, ticker: str,
     df["vr_ratio"] = (df["iv"] / hv) if (np.isfinite(hv) and hv > 0) \
         else float("nan")
 
+    if not df.empty and "gamma" in df.columns and "spot" in df.columns:
+        from options_scanner.compute import gex_summary
+        df["gex_alignment"] = gex_summary.gex_alignment(df, float(df["spot"].iloc[0]))
+    else:
+        df["gex_alignment"] = float("nan")
+
     iv_history.record_scan(ticker, df)
     return df, earnings
 
