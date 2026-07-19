@@ -28,10 +28,14 @@ import io
 import os
 import pickle
 import sqlite3
+from collections.abc import Generator
+from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
+
+from options_scanner import sqlite_util
 
 _DEFAULT_DB = Path(__file__).resolve().parent.parent / "cache" / "chain_cache.db"
 
@@ -40,25 +44,24 @@ def _db_path() -> Path:
     return Path(os.environ.get("OSC_CHAIN_CACHE_DB", str(_DEFAULT_DB)))
 
 
-def _connect() -> sqlite3.Connection:
-    path = _db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS chain_snapshots (
-            ticker     TEXT NOT NULL,
-            scan_date  TEXT NOT NULL,
-            provider   TEXT NOT NULL,
-            min_dte    INTEGER NOT NULL,
-            max_dte    INTEGER,
-            fetched_at TEXT NOT NULL,
-            payload    BLOB NOT NULL,
-            PRIMARY KEY (ticker, scan_date, provider)
+@contextmanager
+def _connect() -> Generator[sqlite3.Connection]:
+    with sqlite_util.connect(_db_path()) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chain_snapshots (
+                ticker     TEXT NOT NULL,
+                scan_date  TEXT NOT NULL,
+                provider   TEXT NOT NULL,
+                min_dte    INTEGER NOT NULL,
+                max_dte    INTEGER,
+                fetched_at TEXT NOT NULL,
+                payload    BLOB NOT NULL,
+                PRIMARY KEY (ticker, scan_date, provider)
+            )
+            """
         )
-        """
-    )
-    return conn
+        yield conn
 
 
 def _covers(cached_min: int, cached_max: int | None,
