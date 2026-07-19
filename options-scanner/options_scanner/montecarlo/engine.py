@@ -2,6 +2,15 @@
 
 `run_simulation(position, config)` is the only public entry point. Pure
 function; safe to wrap in `@st.cache_data` upstream.
+
+BACKLOG (not implemented): every position here is priced European-style
+— `position.evaluate_payoff` settles each leg at intrinsic value on its
+own expiration date, with no early-exercise decision. A simple American
+approximation (e.g. checking, at each simulated step, whether immediate
+exercise beats the continuation value — full treatment is a Longstaff-
+Schwartz least-squares Monte Carlo regression) would matter most for
+ITM covered calls near an ex-dividend date, where early assignment risk
+is real. Flagged here as a known future direction, not scheduled.
 """
 from __future__ import annotations
 

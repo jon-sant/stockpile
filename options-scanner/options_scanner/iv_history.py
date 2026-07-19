@@ -46,6 +46,12 @@ _NEW_COLS: tuple[tuple[str, str], ...] = (
     # later (the live scan's df has these, but nothing persisted them
     # until now).
     ("spot", "REAL"), ("earnings_next_date", "TEXT"),
+    # Directional stance at scan time (see options_scanner.market_view),
+    # e.g. "Bullish" — used to derive Monte Carlo drift. NULL wherever
+    # the scanning tab has no buy/sell x calls/puts/both concept to
+    # derive one from (GEX, Spreads) — same "no state -> neutral"
+    # fallback as any other missing input.
+    ("market_view", "TEXT"),
     # Monte Carlo status/metadata. mc_status NULL == pending — every
     # pre-existing row is implicitly pending the moment this column
     # exists, no backfill UPDATE needed.
@@ -120,16 +126,23 @@ def _connect() -> Generator[sqlite3.Connection]:
 
 def record_scan(ticker: str, df: pd.DataFrame,
                 scan_day: date | None = None,
-                earnings_next_date: date | None = None) -> None:
+                earnings_next_date: date | None = None,
+                market_view: str | None = None) -> None:
     """Persist today's chain snapshot for `ticker` (idempotent per day).
 
     No-op if df is empty or missing the columns we record — keeps the
     store from ever breaking a scan.
 
-    `earnings_next_date` is ticker-level (broadcast to every row, like
-    `spot` already is per-row on `df`) — both are Monte Carlo inputs the
-    background worker needs to rebuild a Position later, since the live
-    df is gone by the time it runs. Rows recorded here never get their
+    `earnings_next_date` and `market_view` are ticker-scan-level
+    (broadcast to every row, like `spot` already is per-row on `df`) —
+    all three are Monte Carlo inputs the background worker needs to
+    rebuild a Position (and now a drift) later, since the live df is
+    gone by the time it runs. `market_view` is the outlook-card stance
+    string (see options_scanner.market_view.stance_for) for whichever
+    tab/CLI invocation did the scanning; callers with no buy/sell x
+    calls/puts/both concept to derive one from (GEX, Spreads) simply
+    don't pass it, leaving it NULL — resolves to no drift, same as any
+    other "no state found" row. Rows recorded here never get their
     `mc_*` result columns filled in directly — those start implicitly
     pending (`mc_status IS NULL`) and are filled in later by the worker.
     """
@@ -152,7 +165,7 @@ def record_scan(ticker: str, df: pd.DataFrame,
          str(r["expiration"]), int(r["dte"]), float(r["iv_excess"]),
          _opt("mid", r), _opt("delta", r), _opt("ann_yield_pct", r),
          _opt("iv", r), _opt("open_interest", r), _opt("volume", r),
-         _opt("spot", r), earnings_next_iso)
+         _opt("spot", r), earnings_next_iso, market_view)
         for _, r in df.iterrows()
         if pd.notna(r["iv_excess"])
     ]
@@ -168,8 +181,8 @@ def record_scan(ticker: str, df: pd.DataFrame,
                 "INSERT INTO iv_history "
                 "(ticker, scan_date, type, strike, expiration, dte, iv_excess, "
                 " mid, delta, ann_yield_pct, iv, open_interest, volume, "
-                " spot, earnings_next_date) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " spot, earnings_next_date, market_view) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
     except sqlite3.Error:
@@ -294,15 +307,53 @@ def pending_mc_rows(limit: int, priority_ticker: str | None = None) -> pd.DataFr
     composite (ticker, scan_date, type, strike, expiration) WHERE clause.
     """
     cols = ["rowid", "ticker", "scan_date", "type", "strike", "expiration",
-            "dte", "mid", "iv", "spot", "earnings_next_date"]
+            "dte", "mid", "iv", "spot", "earnings_next_date", "market_view"]
     try:
         with _connect() as conn:
             df = pd.read_sql_query(
                 "SELECT rowid, ticker, scan_date, type, strike, expiration, "
-                "       dte, mid, iv, spot, earnings_next_date "
+                "       dte, mid, iv, spot, earnings_next_date, market_view "
                 "FROM iv_history WHERE mc_status IS NULL "
                 "ORDER BY (ticker = ?) DESC, scan_date DESC LIMIT ?",
                 conn, params=(priority_ticker.upper() if priority_ticker else "", limit),
+            )
+    except sqlite3.Error:
+        return pd.DataFrame(columns=cols)
+    return df
+
+
+def mc_rows_for_keys(ticker: str, keys: list[tuple[str, float, str]],
+                     scan_date: date | None = None) -> pd.DataFrame:
+    """Still-pending rows (mc_status IS NULL) among an exact set of
+    `(type, strike, expiration)` keys for `ticker`'s `scan_date` (default
+    today) — same shape as `pending_mc_rows`, but scoped to precisely the
+    rows a caller wants to block on (e.g. the top-N rows about to be
+    displayed), rather than a priority-ordered slice of the whole
+    backlog. Keys already `mc_status='done'`/`'error'` are simply absent
+    from the result — the caller doesn't need to distinguish "already
+    computed" from "not requested".
+
+    Empty `keys` (or no matches) returns an empty frame — never queries
+    with an empty IN (...) clause.
+    """
+    cols = ["rowid", "ticker", "scan_date", "type", "strike", "expiration",
+            "dte", "mid", "iv", "spot", "earnings_next_date", "market_view"]
+    if not keys:
+        return pd.DataFrame(columns=cols)
+    scan_date_iso = (scan_date or date.today()).isoformat()
+    # One placeholder pair per key: type = ? AND strike = ? AND expiration = ?
+    key_clause = " OR ".join(["(type = ? AND strike = ? AND expiration = ?)"] * len(keys))
+    params: list = [ticker.upper(), scan_date_iso]
+    for t, strike, expiration in keys:
+        params.extend([t, float(strike), expiration])
+    try:
+        with _connect() as conn:
+            df = pd.read_sql_query(
+                "SELECT rowid, ticker, scan_date, type, strike, expiration, "
+                "       dte, mid, iv, spot, earnings_next_date, market_view "
+                "FROM iv_history WHERE ticker = ? AND scan_date = ? "
+                f"AND mc_status IS NULL AND ({key_clause})",
+                conn, params=params,
             )
     except sqlite3.Error:
         return pd.DataFrame(columns=cols)

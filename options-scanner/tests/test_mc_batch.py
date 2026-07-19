@@ -153,3 +153,36 @@ def test_run_batch_isolates_missing_inputs_with_clear_error():
     assert bad_result is None
     assert "TypeError" not in bad_error
     assert "spot" in bad_error
+
+
+# ── market_view -> drift (Enhancement 2) ─────────────────────────────────
+
+
+def test_bullish_market_view_raises_prob_profit_for_long_call():
+    neutral = mc_batch.compute_mc_for_row(_row(market_view=None))
+    bullish = mc_batch.compute_mc_for_row(_row(market_view="Bullish"))
+    assert bullish["mc_prob_profit_buy"] > neutral["mc_prob_profit_buy"]
+
+
+def test_bearish_market_view_lowers_prob_profit_for_long_call():
+    neutral = mc_batch.compute_mc_for_row(_row(market_view=None))
+    bearish = mc_batch.compute_mc_for_row(_row(market_view="Bearish"))
+    assert bearish["mc_prob_profit_buy"] < neutral["mc_prob_profit_buy"]
+
+
+def test_non_directional_market_view_matches_neutral():
+    neutral = mc_batch.compute_mc_for_row(_row(market_view=None))
+    range_bound = mc_batch.compute_mc_for_row(
+        _row(market_view="Range-bound (short volatility)"))
+    assert range_bound["mc_prob_profit_buy"] == neutral["mc_prob_profit_buy"]
+
+
+def test_missing_market_view_key_defaults_to_no_drift():
+    # _row()'s base dict has no "market_view" key at all (not even None) —
+    # confirms row.get("market_view") handles a fully absent key the same
+    # as an explicit None, not a KeyError.
+    row = _row()
+    assert "market_view" not in row
+    result = mc_batch.compute_mc_for_row(row)
+    neutral = mc_batch.compute_mc_for_row(_row(market_view=None))
+    assert result["mc_prob_profit_buy"] == neutral["mc_prob_profit_buy"]

@@ -91,3 +91,54 @@ def test_restart_with_priority_recreates_executor_and_sets_priority():
     second = mc_background._get_executor()
     assert second is not first
     assert isinstance(second, ThreadPoolExecutor)
+
+
+def test_pool_size_reflects_multiplier():
+    import os
+    expected = max(1, (os.cpu_count() or 2) - 1) * mc_background._POOL_MULTIPLIER
+    assert mc_background._pool_size() == expected
+
+
+# ── compute_now() — the blocking counterpart to _tick() (Enhancement 1) ──
+
+
+def test_compute_now_blocks_and_computes_real_values():
+    iv_history.record_scan("AMD", _snapshot(2), scan_day=date(2026, 7, 19))
+    keys = [("call", 100.0, "2026-09-18"), ("call", 101.0, "2026-09-18")]
+    rows = iv_history.mc_rows_for_keys("AMD", keys, scan_date=date(2026, 7, 19)).to_dict("records")
+
+    mc_background.compute_now(rows, timeout=30.0)
+
+    mc = iv_history.mc_results_for("AMD", scan_date=date(2026, 7, 19))
+    assert (mc["mc_status"] == "done").all()
+    assert mc["mc_fair_value"].notna().all()
+
+
+def test_compute_now_empty_rows_is_a_noop():
+    mc_background.compute_now([], timeout=1.0)  # must not raise
+
+
+def test_compute_now_isolates_bad_rows():
+    df = _snapshot(2)
+    df.loc[0, "iv"] = None
+    iv_history.record_scan("AMD", df, scan_day=date(2026, 7, 19))
+    keys = [("call", 100.0, "2026-09-18"), ("call", 101.0, "2026-09-18")]
+    rows = iv_history.mc_rows_for_keys("AMD", keys, scan_date=date(2026, 7, 19)).to_dict("records")
+
+    mc_background.compute_now(rows, timeout=30.0)
+
+    mc = iv_history.mc_results_for("AMD", scan_date=date(2026, 7, 19))
+    statuses = sorted(mc["mc_status"].tolist())
+    assert statuses == ["done", "error"]
+
+
+def test_compute_now_timeout_leaves_rows_pending():
+    df = _snapshot(5)
+    iv_history.record_scan("AMD", df, scan_day=date(2026, 7, 19))
+    keys = [("call", 100.0 + i, "2026-09-18") for i in range(5)]
+    rows = iv_history.mc_rows_for_keys("AMD", keys, scan_date=date(2026, 7, 19)).to_dict("records")
+
+    # A near-zero timeout can't possibly finish any batch in time.
+    mc_background.compute_now(rows, timeout=0.0001)
+
+    assert len(iv_history.pending_mc_rows(limit=10)) == 5

@@ -22,6 +22,7 @@ import time
 from datetime import date
 from typing import Literal
 
+from options_scanner.market_view import drift_for_stance
 from options_scanner.montecarlo import Leg, Position, SimulationConfig
 from options_scanner.montecarlo.engine import metrics_for_position, prepare_paths
 
@@ -84,8 +85,10 @@ def compute_mc_for_row(row: dict) -> dict:
     sides, plus `duration_ms`.
 
     `row` must have: ticker, scan_date, type, strike, expiration, mid,
-    iv, spot, earnings_next_date (all as read back from
-    `iv_history.pending_mc_rows`).
+    iv, spot, earnings_next_date, market_view (all as read back from
+    `iv_history.pending_mc_rows`/`mc_rows_for_keys`). `market_view` is
+    optional (may be absent/None) — drift_for_stance() returns 0.0 drift
+    for that case, same as any non-directional/unrecognized stance.
 
     Raises ValueError with a clear reason when spot/mid/iv are missing
     or unusable (permanently un-computable — e.g. a legacy row scanned
@@ -103,7 +106,8 @@ def compute_mc_for_row(row: dict) -> dict:
     today = date.fromisoformat(row["scan_date"])
     seed = _deterministic_seed(row["ticker"], row["scan_date"], row["type"],
                               row["strike"], row["expiration"])
-    config = SimulationConfig(seed=seed)
+    drift = drift_for_stance(row.get("market_view"))
+    config = SimulationConfig(seed=seed, drift=drift)
 
     long_position = _position_for_row(row, "long")
     short_position = _position_for_row(row, "short")
