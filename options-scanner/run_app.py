@@ -40,6 +40,21 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
+
+# ── Background scan scheduler ────────────────────────────────────────────────
+# st.cache_resource caches by process, not by session/rerun — this factory
+# runs exactly once per server process no matter how many browser tabs/
+# reruns hit the app, which is what "start one background thread" needs.
+# See options_scanner/background_scan.py for what the thread actually does.
+@st.cache_resource(show_spinner=False)
+def _background_scan_singleton():
+    from options_scanner.background_scan import start_background_scan_once
+    return start_background_scan_once()
+
+
+_background_scan_singleton()
+
+
 # Inject the global stylesheet and Altair theme as early as possible so
 # every downstream widget renders in the redesigned visual language.
 inject_theme()
